@@ -1,0 +1,83 @@
+:root { font-family: "Segoe UI", "Yu Gothic UI", system-ui, sans-serif; color: #e6e9ef; background: #111318; font-synthesis: none; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 920px; background: #111318; }
+button, input { font: inherit; }
+button { color: inherit; cursor: pointer; }
+.shell { display: grid; grid-template-columns: 64px minmax(0, 1fr); min-height: 100vh; }
+.sidebar { display: flex; flex-direction: column; align-items: center; gap: 20px; padding: 18px 10px; border-right: 1px solid #272b34; background: #15171d; }
+.brand { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 10px; color: #101318; background: #b3e2ff; font-weight: 800; }
+.sidebar nav { display: flex; flex-direction: column; gap: 8px; }
+.nav-button { display: grid; place-items: center; width: 42px; height: 42px; border: 1px solid transparent; border-radius: 10px; color: #89919f; background: transparent; font-size: 18px; }
+.nav-button:hover, .nav-button:focus-visible, .nav-button.active { border-color: #354250; color: #dcefff; background: #202832; outline: none; }
+.manage-button { margin-top: auto; }
+.workspace { min-width: 0; padding: 34px 38px 24px; }
+.topbar { display: flex; align-items: end; justify-content: space-between; gap: 24px; max-width: 1400px; margin: 0 auto 26px; }
+.eyebrow, .detail-label { color: #7f8998; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+h1, h2, p { margin: 0; }
+h1 { margin-top: 5px; font-size: 24px; letter-spacing: -.02em; }
+.search-wrap { display: flex; align-items: center; width: min(480px, 45vw); height: 42px; padding: 0 9px 0 14px; border: 1px solid #333b49; border-radius: 11px; background: #1a1e26; }
+.search-wrap:focus-within { border-color: #8bc8f0; box-shadow: 0 0 0 3px #8bc8f01d; }
+.search-icon { color: #a8b2c0; font-size: 24px; line-height: 1; transform: rotate(-20deg); }
+.search-wrap input { flex: 1; min-width: 0; margin: 0 10px; border: 0; outline: 0; color: #eef5fb; background: transparent; }
+.search-wrap input::placeholder { color: #77808f; }
+kbd { padding: 3px 6px; border: 1px solid #3b4553; border-radius: 5px; color: #919cac; background: #20252e; font-size: 10px; }
+.options-button, .icon-button { border: 0; background: transparent; }
+.options-button { width: 29px; height: 29px; margin-left: 8px; border-radius: 7px; color: #929dac; }
+.options-button:hover, .options-button.active { color: #c5e8ff; background: #293642; }
+.options-panel { display: flex; align-items: center; gap: 16px; max-width: 1400px; margin: -10px auto 20px; padding: 11px 14px; border: 1px solid #2f3945; border-radius: 9px; color: #bac4d0; background: #171c23; font-size: 12px; }
+.options-panel label { display: flex; gap: 6px; align-items: center; color: #dfe7ef; }
+.options-panel input { accent-color: #9ed8fa; }
+.option-hint { margin-left: auto; color: #778291; }
+.home-switcher { display: flex; align-items: center; gap: 4px; max-width: 1400px; margin: 0 auto 12px; border-bottom: 1px solid #252b34; }
+.home-switcher button { padding: 10px 12px; border: 0; border-bottom: 2px solid transparent; color: #7f8998; background: transparent; font-size: 12px; }
+.home-switcher button:hover, .home-switcher button.current { border-bottom-color: #9dd9fb; color: #e6f5ff; }
+.result-count { margin-left: auto; padding: 10px 4px; color: #75808e; font-size: 11px; }
+.content-grid { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 18px; max-width: 1400px; margin: 0 auto; }
+.list-panel, .detail-panel { min-height: 560px; border: 1px solid #252b35; border-radius: 12px; background: #15181e; }
+.list-panel { padding: 10px 14px 14px; }
+.list-head { display: grid; grid-template-columns: minmax(0, 1fr) minmax(160px, .66fr) 58px; gap: 8px; padding: 4px 10px 9px 8px; color: #667181; font-size: 10px; }
+.item-list { display: grid; gap: 2px; }
+.item-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(160px, .66fr) 28px 28px; align-items: center; gap: 8px; min-height: 52px; padding: 4px 6px; border: 1px solid transparent; border-radius: 8px; }
+.item-row:hover, .item-row:focus-visible { border-color: #313b48; background: #1c222b; outline: none; }
+.item-row.selected { border-color: #39566a; background: #202d38; }
+.item-main { display: flex; min-width: 0; align-items: center; gap: 10px; padding: 0; border: 0; text-align: left; background: transparent; }
+.type-badge { display: grid; place-items: center; flex: 0 0 auto; width: 34px; height: 30px; border-radius: 7px; color: #b9e4fb; background: #234050; font-size: 8px; font-weight: 800; }
+.type-badge.item-folder, .type-badge.large.item-folder { color: #f4d59a; background: #4a3a22; }
+.type-badge.large { width: 44px; height: 39px; font-size: 9px; }
+.item-copy { min-width: 0; }
+.item-copy strong { display: block; overflow-wrap: anywhere; color: #e8edf3; font-size: 13px; line-height: 1.24; }
+.tags, .detail-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; color: #8395a8; font-size: 10px; }
+.tags span, .detail-tags span { padding: 2px 5px; border-radius: 4px; background: #222b35; }
+.path { overflow: hidden; color: #8290a0; font-family: "Cascadia Code", Consolas, monospace; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.icon-button { display: grid; place-items: center; width: 27px; height: 27px; border-radius: 6px; color: #9fb5c7; font-size: 17px; }
+.icon-button:hover, .icon-button:focus-visible { color: #d3efff; background: #2d3b48; outline: none; }
+.icon-button.subdued { color: #667181; font-size: 12px; }
+.keyboard-hint { margin: 18px 8px 2px; color: #65707e; font-size: 10px; }
+.detail-panel { padding: 19px; }
+.detail-top { display: flex; justify-content: space-between; align-items: center; }
+.status-dot { color: #96d6b4; font-size: 10px; }
+.detail-title { display: flex; gap: 12px; align-items: center; margin: 20px 0 18px; }
+.detail-title h2 { overflow-wrap: anywhere; font-size: 16px; line-height: 1.3; }
+.detail-actions { display: flex; gap: 7px; margin-bottom: 25px; }
+.primary, .secondary { height: 34px; padding: 0 13px; border-radius: 7px; font-size: 12px; }
+.primary { border: 1px solid #a8d6f2; color: #10202a; background: #b5e2fa; font-weight: 700; }
+.primary:hover { background: #d2efff; }
+.primary span { margin-left: 9px; opacity: .55; font-size: 10px; }
+.secondary { border: 1px solid #394553; color: #c3ccd7; background: #20262f; }
+.secondary:hover { background: #2b3541; }
+dl { display: grid; gap: 15px; margin: 0; }
+dl div { display: grid; gap: 5px; }
+dt { color: #707b89; font-size: 10px; }
+dd { margin: 0; overflow-wrap: anywhere; color: #d0d7e0; font-size: 12px; line-height: 1.4; }
+.detail-path { color: #a5bbcc; font-family: "Cascadia Code", Consolas, monospace; font-size: 10px; }
+.detail-footer { margin-top: 30px; padding-top: 14px; border-top: 1px solid #262d38; color: #647181; font-size: 10px; }
+.detail-empty { display: grid; place-items: center; height: 100%; color: #6e7886; font-size: 12px; text-align: center; }
+.empty-state, .management { display: grid; place-items: center; align-content: center; min-height: 530px; gap: 12px; color: #8d98a6; text-align: center; }
+.empty-icon { display: grid; place-items: center; width: 48px; height: 48px; border-radius: 14px; color: #9fd8f7; background: #1c3340; font-size: 22px; }
+.empty-state h2, .management h2 { color: #dbe2ea; font-size: 16px; }
+.empty-state p, .management p { font-size: 12px; }
+.management { max-width: 1400px; min-height: 610px; margin: 0 auto; border: 1px solid #252b35; border-radius: 12px; background: #15181e; }
+.management-note { margin-top: 20px; color: #657181; font-size: 11px; }
+.toast { position: fixed; right: 28px; bottom: 24px; padding: 11px 15px; border: 1px solid #3e5362; border-radius: 8px; color: #d9f1ff; background: #1d303b; box-shadow: 0 8px 30px #0005; font-size: 12px; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
+@media (max-width: 1100px) { .workspace { padding: 28px 24px 20px; } .content-grid { grid-template-columns: minmax(0, 1fr) 280px; } .path { display: none; } .list-head { grid-template-columns: 1fr 58px; } .item-row { grid-template-columns: minmax(0, 1fr) 28px 28px; } }
