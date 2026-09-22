@@ -1036,9 +1036,9 @@
       </div>
       {#if manageSection === 'overview'}
       <section class="management" aria-labelledby="management-title">
-        <div class="management-heading"><div class="empty-icon" aria-hidden="true">⚙</div><div><h2 id="management-title">管理</h2><p>登録項目とアプリの保存先を管理します。</p></div><button class="primary management-add" onclick={beginNewItem}>＋ 登録</button></div>
+        <div class="management-heading"><div class="empty-icon" aria-hidden="true">⚙</div><div><h2 id="management-title">管理</h2></div><button class="primary management-add" onclick={beginNewItem}>＋ 登録</button></div>
         <section class="settings-card item-management" aria-labelledby="items-title">
-          <div class="settings-card-heading"><div><h3 id="items-title">登録項目 <span class="subtle-count">{items.length}件</span></h3><p>登録・編集・検索対象の切替</p></div></div>
+          <div class="settings-card-heading"><div><h3 id="items-title">登録項目 <span class="subtle-count">{items.length}件</span></h3></div></div>
           {#if items.length}
             <div class="managed-list">
               {#each items as item (item.id)}
@@ -1055,29 +1055,28 @@
           {#if itemMessage}<p class="storage-message error" role="status">{itemMessage}</p>{/if}
         </section>
         <section class="settings-card taxonomy-card" aria-labelledby="taxonomy-title">
-          <div class="settings-card-heading"><div><h3 id="taxonomy-title">タグ・カテゴリ</h3><p>登録内容の整理。項目の編集時に候補として使えます。</p></div></div>
+          <div class="settings-card-heading"><div><h3 id="taxonomy-title">タグ・カテゴリ</h3></div></div>
           <div class="taxonomy-group"><h4>タグ <span class="subtle-count">{taxonomyTags.length}</span></h4><div class="taxonomy-chips">{#each taxonomyTags as tag}<button onclick={() => beginTaxonomyRename('tag', tag)} title={`「${tag}」を変更`}>#{tag}<span>編集</span></button>{:else}<span class="taxonomy-empty">登録済みタグはありません</span>{/each}</div></div>
           <div class="taxonomy-group"><h4>カテゴリ <span class="subtle-count">{taxonomyCategories.length}</span></h4><div class="taxonomy-chips">{#each taxonomyCategories as category}<button onclick={() => beginTaxonomyRename('category', category)} title={`「${category}」を変更`}>{category}<span>編集</span></button>{:else}<span class="taxonomy-empty">登録済みカテゴリはありません</span>{/each}</div></div>
         </section>
         <section class="settings-card link-check-card" aria-labelledby="link-check-title">
-          <div class="settings-card-heading"><div><h3 id="link-check-title">リンク切れ確認</h3><p>自動確認は行いません。必要なときだけ実行してください。</p></div><button class="secondary" disabled={linkCheckBusy} onclick={checkRegisteredPaths}>{linkCheckBusy ? '確認中…' : '今すぐ確認'}</button></div>
+          <div class="settings-card-heading"><div><h3 id="link-check-title">リンク切れ確認</h3></div><button class="secondary" disabled={linkCheckBusy} onclick={checkRegisteredPaths}>{linkCheckBusy ? '確認中…' : '今すぐ確認'}</button></div>
           {#if linkCheckMessage}<p class="storage-message" role="status">{linkCheckMessage}</p>{/if}
           {#if brokenPaths.length}<div class="broken-list">{#each brokenPaths as broken}<div><strong>{broken.name}</strong><span title={broken.path}>{narrowPath(broken.path, 72)}</span><button class="text-button" onclick={() => { const item = items.find((candidate) => candidate.id === broken.id); if (item) beginEditItem(item); }}>確認</button></div>{/each}</div>{/if}
         </section>
         <section class="settings-card" aria-labelledby="storage-title">
-          <div class="settings-card-heading"><div><h3 id="storage-title">データ保存先</h3><p>Pathlyのデータベースを置くフォルダー</p></div><span class="setting-badge">SQLite</span></div>
+          <div class="settings-card-heading"><div><h3 id="storage-title">データ保存先</h3></div><span class="setting-badge">SQLite</span></div>
           <label class="storage-label" for="storage-directory">保存先フォルダー</label>
           <div class="storage-input-row"><input id="storage-directory" bind:value={storageDirectory} placeholder="例: D:\PathlyData" spellcheck="false" /><button class="primary" disabled={storageBusy || !storageDirectory.trim()} onclick={saveStorageDirectory}>{storageBusy ? '保存中…' : '変更する'}</button></div>
           <div class="default-location"><span>既定</span><code>{defaultStorageDirectory || '読み込み中…'}</code><button class="text-button" disabled={storageBusy} onclick={resetStorageDirectory}>既定に戻す</button></div>
           <p class="storage-note">開発時はプロジェクトのトップ、ビルド版はPathly.exeと同じフォルダーを既定にします。保存先変更時は現在のデータベースを複製します。変更前のデータベースは自動削除しません。</p>
           {#if storageMessage}<p class:error={storageError} class="storage-message" role="status">{storageMessage}</p>{/if}
         </section>
-        <div class="management-note">確認を実行したときだけ、登録済みの各パスへアクセスします。自動走査やPC全体のインデックス作成は行いません。</div>
       </section>
       {:else}
       <section class="records-management" aria-labelledby="records-title">
         <div class="records-toolbar">
-          <div><h2 id="records-title">レコード</h2><p>SQLiteに保存された登録情報を確認・編集します。Ctrl/⌘+クリックで追加選択、Shift+クリックで範囲選択できます。</p></div>
+          <div><h2 id="records-title">レコード</h2></div>
           <div class="records-actions">
             <button class="secondary danger-button" disabled={!selectedRecordIds.length || bulkDeleteBusy} onclick={() => void deleteSelectedRecords()}>{bulkDeleteBusy ? '削除中…' : `選択を削除 (${selectedRecordIds.length})`}</button>
             <button class="secondary" onclick={() => void copyRecordsAsTsv()}>Excelへコピー</button>
@@ -1148,7 +1147,6 @@
           <label><input type="checkbox" bind:checked={options.fileName} /> ファイル名</label>
           <label><input type="checkbox" bind:checked={options.path} /> 保存場所</label>
           <label class="sort-control">並び順<select bind:value={sortMode}><option value="frequency">利用回数順</option><option value="name">名前順</option></select></label>
-          <span class="option-hint">通常は名前とタグだけを検索します</span>
         </div>
       {/if}
 
@@ -1181,7 +1179,6 @@
               <span>{listPage * listPageSize + 1}–{Math.min((listPage + 1) * listPageSize, results.length)} / {results.length}件</span>
               <div><button class="pagination-button" disabled={listPage === 0} aria-label="前のページ" onclick={() => void changeListPage(-1)}>‹</button><span>{listPage + 1} / {pageCount}</span><button class="pagination-button" disabled={listPage >= pageCount - 1} aria-label="次のページ" onclick={() => void changeListPage(1)}>›</button></div>
             </div>
-            <div class="keyboard-hint"><kbd>↑</kbd><kbd>↓</kbd> 項目選択　 <kbd>←</kbd><kbd>→</kbd> 一覧ページ移動　 <kbd>Enter</kbd> 開く　 <kbd>Ctrl K</kbd> 検索</div>
           {:else}
             <div class="empty-state"><div class="empty-icon">⌕</div><h2>見つかりません</h2><p>名前やタグを変えるか、検索オプションを開いてください。</p></div>
           {/if}

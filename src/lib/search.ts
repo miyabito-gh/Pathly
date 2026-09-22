@@ -14,8 +14,16 @@ export function filterItems(items: PathItem[], query: string, mode: HomeMode, op
   let visible = items.filter((item) => !item.excluded);
 
   if (mode === 'favorites') visible = visible.filter((item) => item.favorite);
-  if (mode === 'recent') visible = [...visible].sort((a, b) => (b.lastUsedAt ?? '').localeCompare(a.lastUsedAt ?? ''));
-  if (mode === 'frequent') visible = [...visible].sort((a, b) => b.useCount - a.useCount);
+  if (mode === 'recent') {
+    visible = visible
+      .filter((item) => item.lastUsedAt != null)
+      .sort((a, b) => b.lastUsedAt!.localeCompare(a.lastUsedAt!));
+  }
+  if (mode === 'frequent') {
+    visible = visible
+      .filter((item) => item.useCount > 0)
+      .sort((a, b) => b.useCount - a.useCount);
+  }
   if (!normalized) return visible;
 
   return visible.filter((item) => {

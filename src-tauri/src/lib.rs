@@ -85,8 +85,22 @@ struct PreparedRecordWrite {
     excluded: bool,
 }
 
-pub trait PathRepository: Send {
+trait PathRepository: Send {
     fn list(&self) -> SqlResult<Vec<RegisteredPath>>;
+    fn get(&self, id: i64) -> SqlResult<RegisteredPath>;
+    fn apply_record_batch(
+        &self,
+        records: Vec<PreparedRecordWrite>,
+    ) -> SqlResult<Vec<RegisteredPath>>;
+    fn delete(&self, id: i64) -> SqlResult<()>;
+    fn delete_many(&self, ids: &[i64]) -> SqlResult<()>;
+    fn path_for(&self, id: i64) -> SqlResult<PathBuf>;
+    fn mark_used(&self, id: i64) -> SqlResult<()>;
+    fn check_registered_paths(&self) -> SqlResult<Vec<BrokenPath>>;
+    fn list_taxonomy(&self) -> SqlResult<Taxonomy>;
+    fn rename_tag(&self, old_tag: &str, new_tag: &str) -> SqlResult<()>;
+    fn rename_category(&self, old_category: &str, new_category: &str) -> SqlResult<()>;
+    fn backup_to(&self, path: &PathBuf) -> SqlResult<()>;
 }
 
 pub struct SqlitePathRepository {
@@ -95,7 +109,7 @@ pub struct SqlitePathRepository {
 
 impl SqlitePathRepository {
     pub fn open(path: PathBuf) -> SqlResult<Self> {
-        let connection = Connection::open(&path)?;
+        let mut connection = Connection::open(&path)?;
         connection.execute_batch(
             "CREATE TABLE IF NOT EXISTS registered_paths (
                 id INTEGER PRIMARY KEY,
@@ -127,6 +141,7 @@ impl SqlitePathRepository {
         if !has_category {
             connection.execute("ALTER TABLE registered_paths ADD COLUMN category TEXT", [])?;
         }
+        normalize_stored_paths(&mut connection)?;
         connection.execute_batch("PRAGMA foreign_keys = ON;")?;
         Ok(Self {
             connection: Mutex::new(connection),
@@ -137,6 +152,36 @@ impl SqlitePathRepository {
         let connection = self.connection.lock().expect("repository mutex poisoned");
         connection.backup(DatabaseName::Main, path, None)
     }
+}
+
+fn normalize_stored_paths(connection: &mut Connection) -> SqlResult<()> {
+    let paths = {
+        let mut statement = connection.prepare("SELECT id, path FROM registered_paths")?;
+        let paths = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<SqlResult<Vec<_>>>()?;
+        paths
+    };
+    let changed = paths
+        .into_iter()
+        .filter_map(|(id, path)| {
+            let normalized = normalize_input_path(&path);
+            (normalized != path).then_some((id, normalized))
+        })
+        .collect::<Vec<_>>();
+    if changed.is_empty() {
+        return Ok(());
+    }
+    let transaction = connection.transaction()?;
+    for (id, path) in changed {
+        transaction.execute(
+            "UPDATE registered_paths SET path = ?1 WHERE id = ?2",
+            params![path, id],
+        )?;
+    }
+    transaction.commit()
 }
 
 impl PathRepository for SqlitePathRepository {
@@ -169,6 +214,43 @@ impl PathRepository for SqlitePathRepository {
             })
         })?;
         rows.collect()
+    }
+
+    fn get(&self, id: i64) -> SqlResult<RegisteredPath> {
+        SqlitePathRepository::get(self, id)
+    }
+    fn apply_record_batch(
+        &self,
+        records: Vec<PreparedRecordWrite>,
+    ) -> SqlResult<Vec<RegisteredPath>> {
+        SqlitePathRepository::apply_record_batch(self, records)
+    }
+    fn delete(&self, id: i64) -> SqlResult<()> {
+        SqlitePathRepository::delete(self, id)
+    }
+    fn delete_many(&self, ids: &[i64]) -> SqlResult<()> {
+        SqlitePathRepository::delete_many(self, ids)
+    }
+    fn path_for(&self, id: i64) -> SqlResult<PathBuf> {
+        SqlitePathRepository::path_for(self, id)
+    }
+    fn mark_used(&self, id: i64) -> SqlResult<()> {
+        SqlitePathRepository::mark_used(self, id)
+    }
+    fn check_registered_paths(&self) -> SqlResult<Vec<BrokenPath>> {
+        SqlitePathRepository::check_registered_paths(self)
+    }
+    fn list_taxonomy(&self) -> SqlResult<Taxonomy> {
+        SqlitePathRepository::list_taxonomy(self)
+    }
+    fn rename_tag(&self, old_tag: &str, new_tag: &str) -> SqlResult<()> {
+        SqlitePathRepository::rename_tag(self, old_tag, new_tag)
+    }
+    fn rename_category(&self, old_category: &str, new_category: &str) -> SqlResult<()> {
+        SqlitePathRepository::rename_category(self, old_category, new_category)
+    }
+    fn backup_to(&self, path: &PathBuf) -> SqlResult<()> {
+        SqlitePathRepository::backup_to(self, path)
     }
 }
 
@@ -447,7 +529,7 @@ struct PersistedStorageSettings {
 }
 
 struct StorageState {
-    repository: SqlitePathRepository,
+    repository: Box<dyn PathRepository>,
     current_directory: PathBuf,
     default_directory: PathBuf,
     settings_path: PathBuf,
@@ -894,7 +976,10 @@ fn backup_database(path: String, state: State<'_, AppState>) -> Result<(), Strin
         .ok_or_else(|| "バックアップファイル名を確認できません".to_string())?;
     let destination = parent.join(file_name);
     if destination.exists() {
-        return Err("選択したファイルは既に存在します。上書きを避けるため、別の名前を指定してください".to_string());
+        return Err(
+            "選択したファイルは既に存在します。上書きを避けるため、別の名前を指定してください"
+                .to_string(),
+        );
     }
 
     let storage = state
@@ -1115,7 +1200,7 @@ fn switch_storage(
         return Err(error);
     }
 
-    storage.repository = next_repository;
+    storage.repository = Box::new(next_repository);
     storage.current_directory = directory;
     storage.is_custom = is_custom;
     Ok(storage.settings())
@@ -1201,8 +1286,10 @@ fn load_storage_state() -> Result<StorageState, String> {
         .unwrap_or_else(|| default_directory.clone());
     std::fs::create_dir_all(&current_directory)
         .map_err(|error| format!("データ保存先を作成できません: {error}"))?;
-    let repository = SqlitePathRepository::open(current_directory.join("pathly.sqlite3"))
-        .map_err(|error| format!("Pathlyデータベースを開けません: {error}"))?;
+    let repository = Box::new(
+        SqlitePathRepository::open(current_directory.join("pathly.sqlite3"))
+            .map_err(|error| format!("Pathlyデータベースを開けません: {error}"))?,
+    );
 
     Ok(StorageState {
         repository,
@@ -1469,6 +1556,36 @@ mod tests {
     }
 
     #[test]
+    fn opening_database_normalizes_existing_extended_paths() {
+        let root =
+            std::env::temp_dir().join(format!("pathly-path-migration-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let database = root.join("pathly.sqlite3");
+        {
+            let repository = SqlitePathRepository::open(database.clone()).unwrap();
+            let connection = repository.connection.lock().unwrap();
+            connection.execute(
+                "INSERT INTO registered_paths (name, actual_name, path, kind) VALUES ('drive', 'file.txt', ?1, 'file'), ('unc', 'share', ?2, 'folder')",
+                params![r"\\?\C:\Users\sample\file.txt", r"\\?\UNC\server\share"],
+            ).unwrap();
+        }
+        let repository = SqlitePathRepository::open(database).unwrap();
+        let connection = repository.connection.lock().unwrap();
+        let paths = connection
+            .prepare("SELECT path FROM registered_paths ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<SqlResult<Vec<_>>>()
+            .unwrap();
+        assert_eq!(paths, [r"C:\Users\sample\file.txt", r"\\server\share"]);
+        drop(connection);
+        drop(repository);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn path_validation_rejects_invalid_characters() {
         assert!(validate_path_syntax(r"C:\reports\*.csv").is_err());
         assert!(validate_path_syntax(r"C:\reports\valid.csv").is_ok());
@@ -1706,7 +1823,7 @@ mod tests {
         ).unwrap();
         let state = AppState {
             storage: Mutex::new(StorageState {
-                repository,
+                repository: Box::new(repository),
                 current_directory: source_directory.clone(),
                 default_directory: source_directory.clone(),
                 settings_path: root.join("settings.json"),
