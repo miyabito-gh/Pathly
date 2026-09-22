@@ -113,6 +113,7 @@
   let importBusy = false;
   let importMessage = '';
   let listPage = 0;
+  let theme: 'dark' | 'light' = 'dark';
   const listPageSize = 50;
 
   $: filteredItems = filterItems(items, query, mode, options);
@@ -157,6 +158,12 @@
   function select(item: PathItem) {
     selectedId = item.id;
     actionMenuId = null;
+  }
+
+  function setTheme(nextTheme: 'dark' | 'light') {
+    theme = nextTheme;
+    document.documentElement.dataset.theme = nextTheme;
+    try { localStorage.setItem('pathly.theme', nextTheme); } catch { /* storage may be unavailable */ }
   }
 
   async function toggleFavorite(item: PathItem) {
@@ -917,6 +924,11 @@
         toast = `ドラッグ&ドロップを準備できませんでした: ${String(error)}`;
       });
     }
+    try {
+      const storedTheme = localStorage.getItem('pathly.theme');
+      if (storedTheme === 'light' || storedTheme === 'dark') theme = storedTheme;
+    } catch { /* storage may be unavailable */ }
+    document.documentElement.dataset.theme = theme;
     void refreshItems();
     void refreshTaxonomy();
     void loadStorageSettings();
@@ -986,7 +998,16 @@
             </div>
           {/if}
         </div>
-        <button class="primary topbar-add" onclick={beginNewItem}>＋ 登録</button>
+        <div class="topbar-actions">
+          <button class="theme-toggle" aria-label={theme === 'dark' ? 'ライトテーマに切り替え' : 'ダークテーマに切り替え'} title={theme === 'dark' ? 'ライトテーマに切り替え' : 'ダークテーマに切り替え'} onclick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>
+            {#if theme === 'dark'}<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M2 12h2m16 0h2M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42"/></svg>{:else}<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 15.3A8.5 8.5 0 0 1 8.7 3.5 8.6 8.6 0 1 0 20.5 15.3Z"/><path d="m16.5 4 .5 1.5 1.5.5-1.5.5-.5 1.5L16 6.5 14.5 6 16 5.5z"/></svg>{/if}
+          </button>
+          <button class="primary topbar-add" onclick={beginNewItem}>＋ 登録</button>
+        </div>
+      {:else}
+        <div class="topbar-actions"><button class="theme-toggle" aria-label={theme === 'dark' ? 'ライトテーマに切り替え' : 'ダークテーマに切り替え'} title={theme === 'dark' ? 'ライトテーマに切り替え' : 'ダークテーマに切り替え'} onclick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>
+          {#if theme === 'dark'}<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M2 12h2m16 0h2M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42"/></svg>{:else}<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 15.3A8.5 8.5 0 0 1 8.7 3.5 8.6 8.6 0 1 0 20.5 15.3Z"/><path d="m16.5 4 .5 1.5 1.5.5-1.5.5-.5 1.5L16 6.5 14.5 6 16 5.5z"/></svg>{/if}
+        </button></div>
       {/if}
     </header>
 
@@ -1111,8 +1132,6 @@
           <span class="option-hint">通常は名前とタグだけを検索します</span>
         </div>
       {/if}
-
-      <div class="list-summary"><span>{mode === 'all' ? 'すべての登録項目' : mode === 'favorites' ? 'お気に入り' : mode === 'frequent' ? 'よく使う' : '最近使った'}</span><span class="result-count">{results.length}件</span></div>
 
       <div class="content-grid">
         <section class="list-panel" aria-label="登録項目一覧">
