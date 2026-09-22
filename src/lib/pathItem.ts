@@ -1,4 +1,4 @@
-export type HomeMode = 'favorites' | 'recent' | 'frequent';
+export type HomeMode = 'all' | 'favorites' | 'recent' | 'frequent';
 export type ItemKind = 'file' | 'folder';
 
 export type PathItem = {
@@ -9,6 +9,7 @@ export type PathItem = {
   kind: ItemKind;
   extension?: string;
   tags: string[];
+  category?: string | null;
   memo: string;
   favorite: boolean;
   useCount: number;
@@ -25,6 +26,7 @@ export const sampleItems: PathItem[] = [
     kind: 'file',
     extension: 'PDF',
     tags: ['企画', '経営'],
+    category: '企画',
     memo: '経営会議提出用の最終版。',
     favorite: true,
     useCount: 34,
@@ -38,6 +40,7 @@ export const sampleItems: PathItem[] = [
     path: 'D:\\Workspace\\Design\\デザインシステム\\コンポーネント',
     kind: 'folder',
     tags: ['制作', 'デザイン'],
+    category: '制作',
     memo: '',
     favorite: false,
     useCount: 28,
@@ -52,6 +55,7 @@ export const sampleItems: PathItem[] = [
     kind: 'file',
     extension: 'XLSX',
     tags: ['営業', '顧客'],
+    category: '営業',
     memo: '週次更新。',
     favorite: true,
     useCount: 19,
@@ -66,6 +70,7 @@ export const sampleItems: PathItem[] = [
     kind: 'file',
     extension: 'DOCX',
     tags: ['社内'],
+    category: '社内',
     memo: '',
     favorite: false,
     useCount: 12,
@@ -80,6 +85,7 @@ export const sampleItems: PathItem[] = [
     kind: 'file',
     extension: 'DOCX',
     tags: ['法務', 'テンプレート'],
+    category: '法務',
     memo: '',
     favorite: false,
     useCount: 8,

@@ -13,12 +13,10 @@ export function filterItems(items: PathItem[], query: string, mode: HomeMode, op
   const normalized = query.trim().toLocaleLowerCase();
   let visible = items.filter((item) => !item.excluded);
 
-  if (!normalized) {
-    if (mode === 'favorites') visible = visible.filter((item) => item.favorite);
-    if (mode === 'recent') visible = [...visible].sort((a, b) => (b.lastUsedAt ?? '').localeCompare(a.lastUsedAt ?? ''));
-    if (mode === 'frequent') visible = [...visible].sort((a, b) => b.useCount - a.useCount);
-    return visible;
-  }
+  if (mode === 'favorites') visible = visible.filter((item) => item.favorite);
+  if (mode === 'recent') visible = [...visible].sort((a, b) => (b.lastUsedAt ?? '').localeCompare(a.lastUsedAt ?? ''));
+  if (mode === 'frequent') visible = [...visible].sort((a, b) => b.useCount - a.useCount);
+  if (!normalized) return visible;
 
   return visible.filter((item) => {
     const base = [item.name, ...item.tags].join(' ').toLocaleLowerCase();
