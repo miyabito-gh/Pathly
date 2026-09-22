@@ -730,6 +730,24 @@
     window.setTimeout(() => (toast = ''), 2600);
   }
 
+  async function backupDatabase() {
+    if (!isTauri()) return;
+    const timestamp = new Date().toISOString().replaceAll(':', '-').replaceAll('.', '-');
+    try {
+      const path = await saveDialog({
+        title: 'Pathlyデータベースをバックアップ',
+        defaultPath: `pathly-backup-${timestamp}.sqlite3`,
+        filters: [{ name: 'SQLiteデータベース', extensions: ['sqlite3'] }]
+      });
+      if (!path) return;
+      await invoke('backup_database', { path });
+      toast = 'データベースをバックアップしました';
+    } catch (error) {
+      toast = `バックアップできませんでした: ${String(error)}`;
+    }
+    window.setTimeout(() => (toast = ''), 4000);
+  }
+
   function openPasteDialog() {
     transferText = '';
     transferSource = 'Excel / TSV';
@@ -1066,6 +1084,7 @@
             <button class="secondary" onclick={openPasteDialog}>Excelから貼り付け</button>
             <button class="secondary" onclick={() => void exportRecordsCsv()}>CSV書き出し</button>
             <button class="secondary" onclick={() => void importRecordsCsv()}>CSV読み込み</button>
+            <button class="secondary backup-action" onclick={() => void backupDatabase()}>DBバックアップ</button>
           </div>
         </div>
         <div class="record-search-row">

@@ -872,6 +872,48 @@ fn write_records_text_file(path: String, content: String) -> Result<(), String> 
 }
 
 #[tauri::command]
+fn backup_database(path: String, state: State<'_, AppState>) -> Result<(), String> {
+    let requested = PathBuf::from(normalize_input_path(path.trim()));
+    if !requested.is_absolute() {
+        return Err("バックアップ先には絶対パスを指定してください".to_string());
+    }
+    if !requested
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("sqlite3"))
+    {
+        return Err("SQLiteバックアップファイル（.sqlite3）を指定してください".to_string());
+    }
+    let parent = requested
+        .parent()
+        .ok_or_else(|| "保存先フォルダーを確認できません".to_string())?;
+    let parent = std::fs::canonicalize(parent)
+        .map_err(|error| format!("保存先フォルダーを確認できません: {error}"))?;
+    let file_name = requested
+        .file_name()
+        .ok_or_else(|| "バックアップファイル名を確認できません".to_string())?;
+    let destination = parent.join(file_name);
+    if destination.exists() {
+        return Err("選択したファイルは既に存在します。上書きを避けるため、別の名前を指定してください".to_string());
+    }
+
+    let storage = state
+        .storage
+        .lock()
+        .map_err(|_| "保存先の状態を取得できません".to_string())?;
+    let active_database = std::fs::canonicalize(storage.current_directory.join("pathly.sqlite3"))
+        .unwrap_or_else(|_| storage.current_directory.join("pathly.sqlite3"));
+    if destination == active_database {
+        return Err("現在使用中のデータベース自体にはバックアップできません".to_string());
+    }
+    if let Err(error) = storage.repository.backup_to(&destination) {
+        let _ = std::fs::remove_file(&destination);
+        return Err(format!("データベースをバックアップできません: {error}"));
+    }
+    Ok(())
+}
+
+#[tauri::command]
 fn delete_registered_path(id: i64, state: State<'_, AppState>) -> Result<(), String> {
     state
         .storage
@@ -1192,6 +1234,7 @@ pub fn run() {
             apply_record_batch,
             read_records_text_file,
             write_records_text_file,
+            backup_database,
             delete_registered_path,
             delete_registered_paths,
             open_registered_path,
