@@ -85,22 +85,44 @@ struct PreparedRecordWrite {
     excluded: bool,
 }
 
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+enum RepositoryError {
+    #[error("対象の項目が見つかりません")]
+    NotFound,
+    #[error("入力内容を確認してください: {0}")]
+    InvalidInput(String),
+    #[error("データを処理できません: {0}")]
+    Storage(String),
+}
+
+impl From<rusqlite::Error> for RepositoryError {
+    fn from(error: rusqlite::Error) -> Self {
+        match error {
+            rusqlite::Error::QueryReturnedNoRows => Self::NotFound,
+            rusqlite::Error::InvalidParameterName(message) => Self::InvalidInput(message),
+            error => Self::Storage(error.to_string()),
+        }
+    }
+}
+
+type RepositoryResult<T> = Result<T, RepositoryError>;
+
 trait PathRepository: Send {
-    fn list(&self) -> SqlResult<Vec<RegisteredPath>>;
-    fn get(&self, id: i64) -> SqlResult<RegisteredPath>;
+    fn list(&self) -> RepositoryResult<Vec<RegisteredPath>>;
+    fn get(&self, id: i64) -> RepositoryResult<RegisteredPath>;
     fn apply_record_batch(
         &self,
         records: Vec<PreparedRecordWrite>,
-    ) -> SqlResult<Vec<RegisteredPath>>;
-    fn delete(&self, id: i64) -> SqlResult<()>;
-    fn delete_many(&self, ids: &[i64]) -> SqlResult<()>;
-    fn path_for(&self, id: i64) -> SqlResult<PathBuf>;
-    fn mark_used(&self, id: i64) -> SqlResult<()>;
-    fn check_registered_paths(&self) -> SqlResult<Vec<BrokenPath>>;
-    fn list_taxonomy(&self) -> SqlResult<Taxonomy>;
-    fn rename_tag(&self, old_tag: &str, new_tag: &str) -> SqlResult<()>;
-    fn rename_category(&self, old_category: &str, new_category: &str) -> SqlResult<()>;
-    fn backup_to(&self, path: &PathBuf) -> SqlResult<()>;
+    ) -> RepositoryResult<Vec<RegisteredPath>>;
+    fn delete(&self, id: i64) -> RepositoryResult<()>;
+    fn delete_many(&self, ids: &[i64]) -> RepositoryResult<()>;
+    fn path_for(&self, id: i64) -> RepositoryResult<PathBuf>;
+    fn mark_used(&self, id: i64) -> RepositoryResult<()>;
+    fn check_registered_paths(&self) -> RepositoryResult<Vec<BrokenPath>>;
+    fn list_taxonomy(&self) -> RepositoryResult<Taxonomy>;
+    fn rename_tag(&self, old_tag: &str, new_tag: &str) -> RepositoryResult<()>;
+    fn rename_category(&self, old_category: &str, new_category: &str) -> RepositoryResult<()>;
+    fn backup_to(&self, path: &PathBuf) -> RepositoryResult<()>;
 }
 
 pub struct SqlitePathRepository {
@@ -185,7 +207,7 @@ fn normalize_stored_paths(connection: &mut Connection) -> SqlResult<()> {
 }
 
 impl PathRepository for SqlitePathRepository {
-    fn list(&self) -> SqlResult<Vec<RegisteredPath>> {
+    fn list(&self) -> RepositoryResult<Vec<RegisteredPath>> {
         let connection = self.connection.lock().expect("repository mutex poisoned");
         let mut statement = connection.prepare(
             "SELECT id, name, actual_name, path, kind, memo, favorite, use_count, last_used_at, excluded, category
@@ -213,44 +235,45 @@ impl PathRepository for SqlitePathRepository {
                 category: row.get(10)?,
             })
         })?;
-        rows.collect()
+        Ok(rows.collect::<SqlResult<Vec<_>>>()?)
     }
 
-    fn get(&self, id: i64) -> SqlResult<RegisteredPath> {
+    fn get(&self, id: i64) -> RepositoryResult<RegisteredPath> {
         SqlitePathRepository::get(self, id)
+            .map_err(RepositoryError::from)
     }
     fn apply_record_batch(
         &self,
         records: Vec<PreparedRecordWrite>,
-    ) -> SqlResult<Vec<RegisteredPath>> {
-        SqlitePathRepository::apply_record_batch(self, records)
+    ) -> RepositoryResult<Vec<RegisteredPath>> {
+        SqlitePathRepository::apply_record_batch(self, records).map_err(Into::into)
     }
-    fn delete(&self, id: i64) -> SqlResult<()> {
-        SqlitePathRepository::delete(self, id)
+    fn delete(&self, id: i64) -> RepositoryResult<()> {
+        SqlitePathRepository::delete(self, id).map_err(Into::into)
     }
-    fn delete_many(&self, ids: &[i64]) -> SqlResult<()> {
-        SqlitePathRepository::delete_many(self, ids)
+    fn delete_many(&self, ids: &[i64]) -> RepositoryResult<()> {
+        SqlitePathRepository::delete_many(self, ids).map_err(Into::into)
     }
-    fn path_for(&self, id: i64) -> SqlResult<PathBuf> {
-        SqlitePathRepository::path_for(self, id)
+    fn path_for(&self, id: i64) -> RepositoryResult<PathBuf> {
+        SqlitePathRepository::path_for(self, id).map_err(Into::into)
     }
-    fn mark_used(&self, id: i64) -> SqlResult<()> {
-        SqlitePathRepository::mark_used(self, id)
+    fn mark_used(&self, id: i64) -> RepositoryResult<()> {
+        SqlitePathRepository::mark_used(self, id).map_err(Into::into)
     }
-    fn check_registered_paths(&self) -> SqlResult<Vec<BrokenPath>> {
-        SqlitePathRepository::check_registered_paths(self)
+    fn check_registered_paths(&self) -> RepositoryResult<Vec<BrokenPath>> {
+        SqlitePathRepository::check_registered_paths(self).map_err(Into::into)
     }
-    fn list_taxonomy(&self) -> SqlResult<Taxonomy> {
-        SqlitePathRepository::list_taxonomy(self)
+    fn list_taxonomy(&self) -> RepositoryResult<Taxonomy> {
+        SqlitePathRepository::list_taxonomy(self).map_err(Into::into)
     }
-    fn rename_tag(&self, old_tag: &str, new_tag: &str) -> SqlResult<()> {
-        SqlitePathRepository::rename_tag(self, old_tag, new_tag)
+    fn rename_tag(&self, old_tag: &str, new_tag: &str) -> RepositoryResult<()> {
+        SqlitePathRepository::rename_tag(self, old_tag, new_tag).map_err(Into::into)
     }
-    fn rename_category(&self, old_category: &str, new_category: &str) -> SqlResult<()> {
-        SqlitePathRepository::rename_category(self, old_category, new_category)
+    fn rename_category(&self, old_category: &str, new_category: &str) -> RepositoryResult<()> {
+        SqlitePathRepository::rename_category(self, old_category, new_category).map_err(Into::into)
     }
-    fn backup_to(&self, path: &PathBuf) -> SqlResult<()> {
-        SqlitePathRepository::backup_to(self, path)
+    fn backup_to(&self, path: &PathBuf) -> RepositoryResult<()> {
+        SqlitePathRepository::backup_to(self, path).map_err(Into::into)
     }
 }
 
@@ -1338,6 +1361,23 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sqlite_repository_errors_map_to_database_neutral_errors() {
+        assert_eq!(
+            RepositoryError::from(rusqlite::Error::QueryReturnedNoRows),
+            RepositoryError::NotFound
+        );
+        assert_eq!(
+            RepositoryError::from(rusqlite::Error::InvalidParameterName(
+                "ids must not be empty".into()
+            )),
+            RepositoryError::InvalidInput("ids must not be empty".into())
+        );
+
+        let storage_error = RepositoryError::from(rusqlite::Error::InvalidQuery);
+        assert!(matches!(storage_error, RepositoryError::Storage(_)));
+    }
 
     #[test]
     fn settings_replacement_preserves_new_value_over_existing_file() {
