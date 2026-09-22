@@ -112,9 +112,14 @@
   let importPreview: ImportPreviewRow[] = [];
   let importBusy = false;
   let importMessage = '';
+  let listPage = 0;
+  const listPageSize = 50;
 
   $: filteredItems = filterItems(items, query, mode, options);
   $: results = sortMode === 'name' ? [...filteredItems].sort((a, b) => a.name.localeCompare(b.name, 'ja')) : filteredItems;
+  $: pageCount = Math.max(1, Math.ceil(results.length / listPageSize));
+  $: listPage = Math.min(listPage, pageCount - 1);
+  $: visibleResults = results.slice(listPage * listPageSize, (listPage + 1) * listPageSize);
   $: selected = results.find((item) => item.id === selectedId) ?? null;
   $: recordResults = items.filter((item) => {
     const term = recordQuery.trim().toLocaleLowerCase();
@@ -154,6 +159,32 @@
     actionMenuId = null;
   }
 
+  async function toggleFavorite(item: PathItem) {
+    if (!isTauri() || dataLoading) return;
+    dataLoading = true;
+    try {
+      await invoke('update_registered_path', {
+        id: item.id,
+        path: item.path,
+        kindHint: item.kind,
+        name: item.name,
+        tags: item.tags,
+        category: item.category || null,
+        memo: item.memo,
+        favorite: !item.favorite,
+        excluded: item.excluded
+      });
+      await refreshItems();
+      toast = item.favorite ? 'お気に入りから解除しました' : 'お気に入りに登録しました';
+      window.setTimeout(() => (toast = ''), 2200);
+    } catch (error) {
+      toast = `お気に入りを更新できませんでした: ${String(error)}`;
+      window.setTimeout(() => (toast = ''), 4000);
+    } finally {
+      dataLoading = false;
+    }
+  }
+
   function goHome() {
     manageOpen = false;
     mode = 'all';
@@ -191,28 +222,23 @@
     const nextIndex = index < 0
       ? (delta > 0 ? 0 : rows.length - 1)
       : Math.min(rows.length - 1, Math.max(0, index + delta));
-    const nextItem = results[nextIndex];
+    const nextItem = visibleResults[nextIndex];
     if (nextItem) select(nextItem);
     rows[nextIndex]?.querySelector<HTMLButtonElement>('.item-main')?.focus();
   }
 
-  async function changeHomePage(delta: number) {
-    const pages: HomeMode[] = ['all', 'favorites', 'recent', 'frequent'];
-    const currentIndex = pages.indexOf(mode);
-    const nextIndex = (currentIndex + delta + pages.length) % pages.length;
-    mode = pages[nextIndex];
-    manageOpen = false;
-    query = '';
-    historyOpen = false;
+  async function changeListPage(delta: number) {
+    const nextPage = Math.min(pageCount - 1, Math.max(0, listPage + delta));
+    if (nextPage === listPage) return;
+    listPage = nextPage;
     actionMenuId = null;
     await tick();
-    const firstItem = results[0];
+    const firstItem = visibleResults[delta > 0 ? 0 : visibleResults.length - 1];
     if (firstItem) {
       select(firstItem);
       await tick();
-      document.querySelector<HTMLButtonElement>('.item-list .item-main')?.focus();
-    } else {
-      document.querySelectorAll<HTMLButtonElement>('.sidebar nav .nav-button')[nextIndex]?.focus();
+      const rowIndex = delta > 0 ? 0 : visibleResults.length - 1;
+      document.querySelectorAll<HTMLButtonElement>('.item-list .item-main')[rowIndex]?.focus();
     }
   }
 
@@ -848,7 +874,7 @@
     const editingText = target?.closest('input, textarea, select, [contenteditable="true"]');
     if ((event.key === 'ArrowLeft' || event.key === 'ArrowRight') && !event.altKey && !event.ctrlKey && !event.metaKey && !manageOpen && !transferDialog && !editingText) {
       event.preventDefault();
-      void changeHomePage(event.key === 'ArrowRight' ? 1 : -1);
+      void changeListPage(event.key === 'ArrowRight' ? 1 : -1);
     } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
       event.preventDefault();
       searchInput?.focus();
@@ -1093,13 +1119,14 @@
           {#if results.length}
             <div class="list-head"><span>項目</span><span>保存場所</span><span class="sr-only">操作</span></div>
             <div class="item-list">
-              {#each results as item (item.id)}
+              {#each visibleResults as item (item.id)}
                 <article class:selected={selected?.id === item.id} class="item-row" onpointerdown={(event) => handleRowPointerDown(event, item)} onpointerup={(event) => handleRowPointerUp(event, item)}>
                   <button class="item-main" aria-label={`${item.name}を開く`} onclick={(event) => { event.stopPropagation(); select(item); void openItem(item); }}>
                     <span class:item-folder={item.kind === 'folder'} class="type-badge">{item.kind === 'folder' ? 'DIR' : item.extension}</span>
                     <span class="item-copy"><strong>{item.name}</strong><span class="tags">{#each item.tags as tag}<span>#{tag}</span>{/each}</span></span>
                   </button>
                   <span class="path" title={item.path}>{narrowPath(item.path)}</span>
+                  <button class:favorite-active={item.favorite} class="icon-button action-icon-button favorite-toggle" aria-label={item.favorite ? `${item.name}をお気に入りから解除` : `${item.name}をお気に入りに登録`} title={item.favorite ? 'お気に入り解除' : 'お気に入り登録'} onclick={(event) => { event.stopPropagation(); void toggleFavorite(item); }}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9z"/></svg></button>
                   <button class="icon-button action-icon-button" aria-label={`${item.name}の場所を開く`} title="場所を開く" onclick={(event) => { event.stopPropagation(); openLocation(item); }}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7.5h7l2 2h9v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M3 7V5a2 2 0 0 1 2-2h5l2 2h5"/></svg></button>
                   <button class="icon-button subdued" aria-label={`${item.name}のその他の操作`} title="その他の操作" aria-expanded={actionMenuId === item.id} onclick={(event) => { event.stopPropagation(); select(item); actionMenuId = actionMenuId === item.id ? null : item.id; }}>•••</button>
                   {#if actionMenuId === item.id}
@@ -1112,7 +1139,11 @@
                 </article>
               {/each}
             </div>
-            <div class="keyboard-hint"><kbd>↑</kbd><kbd>↓</kbd> 選択　 <kbd>←</kbd><kbd>→</kbd> ページ切替　 <kbd>Enter</kbd> 開く　 <kbd>Ctrl K</kbd> 検索</div>
+            <div class="list-pagination">
+              <span>{listPage * listPageSize + 1}–{Math.min((listPage + 1) * listPageSize, results.length)} / {results.length}件</span>
+              <div><button class="pagination-button" disabled={listPage === 0} aria-label="前のページ" onclick={() => void changeListPage(-1)}>‹</button><span>{listPage + 1} / {pageCount}</span><button class="pagination-button" disabled={listPage >= pageCount - 1} aria-label="次のページ" onclick={() => void changeListPage(1)}>›</button></div>
+            </div>
+            <div class="keyboard-hint"><kbd>↑</kbd><kbd>↓</kbd> 項目選択　 <kbd>←</kbd><kbd>→</kbd> 一覧ページ移動　 <kbd>Enter</kbd> 開く　 <kbd>Ctrl K</kbd> 検索</div>
           {:else}
             <div class="empty-state"><div class="empty-icon">⌕</div><h2>見つかりません</h2><p>名前やタグを変えるか、検索オプションを開いてください。</p></div>
           {/if}
@@ -1123,6 +1154,7 @@
             <div class="detail-top"><span class="detail-label">選択中</span><span class="status-dot">登録済み</span></div>
             <div class="detail-title"><span class:item-folder={selected.kind === 'folder'} class="type-badge large">{selected.kind === 'folder' ? 'DIR' : selected.extension}</span><h2>{selected.name}</h2></div>
             <div class="detail-actions" aria-label="項目の操作">
+              <button class:favorite-active={selected.favorite} class="icon-button action-icon-button favorite-toggle" aria-label={selected.favorite ? 'お気に入りから解除' : 'お気に入りに登録'} title={selected.favorite ? 'お気に入り解除' : 'お気に入り登録'} onclick={() => void toggleFavorite(selected)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9z"/></svg></button>
               <button class="icon-button action-icon-button detail-open" aria-label={`${selected.name}を開く`} title="開く (Enter)" onclick={() => openItem(selected)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M10 14 21 3M19 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h6" /></svg></button>
               <button class="icon-button action-icon-button" aria-label="保存場所を開く" title="保存場所を開く" onclick={() => openLocation(selected)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7.5h7l2 2h9v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M3 7V5a2 2 0 0 1 2-2h5l2 2h5"/></svg></button>
               <button class="icon-button action-icon-button" aria-label="編集" title="編集" onclick={() => beginEditItem(selected)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 5 5 5M4 20l4.2-.9L19 8.3a2.1 2.1 0 0 0-3-3L5.2 16.1z"/><path d="M13 20h8"/></svg></button>
