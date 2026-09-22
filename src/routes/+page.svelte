@@ -1,10 +1,11 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { invoke, isTauri } from '@tauri-apps/api/core';
-  import { open as openDialog } from '@tauri-apps/plugin-dialog';
+  import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
   import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
   import { filterItems, narrowPath, type SearchOptions } from '$lib/search';
   import { sampleItems, type HomeMode, type PathItem } from '$lib/pathItem';
+  import { parseRecordTransfer, serializeRecords, type ParsedRecordRow, type RecordWrite } from '$lib/recordTransfer';
 
   type StoredPath = {
     id: number;
@@ -21,6 +22,36 @@
     excluded: boolean;
   };
 
+  type PathValidation = {
+    inputPath: string;
+    normalizedPath: string;
+    actualName: string;
+    status: 'exists' | 'missing' | 'unavailable';
+    detectedKind?: 'file' | 'folder' | null;
+    message: string;
+  };
+
+  type RecordDraft = {
+    id: number;
+    actualName: string;
+    name: string;
+    path: string;
+    kindHint: 'file' | 'folder';
+    tags: string;
+    category: string;
+    memo: string;
+    favorite: boolean;
+    excluded: boolean;
+    useCount: number;
+    lastUsedAt: string;
+  };
+
+  type ImportPreviewRow = ParsedRecordRow & {
+    action: '追加' | '更新' | 'エラー';
+    validation?: PathValidation;
+    duplicatePath?: boolean;
+  };
+
   let items: PathItem[] = sampleItems;
   let mode: HomeMode = 'all';
   let query = '';
@@ -29,6 +60,7 @@
   let searchHistory: string[] = [];
   let historyOpen = false;
   let manageOpen = false;
+  let manageSection: 'overview' | 'records' = 'overview';
   let showOptions = false;
   let options: SearchOptions = { fileName: false, path: false };
   let toast = '';
@@ -53,6 +85,9 @@
   let draftMemo = '';
   let draftFavorite = false;
   let draftExcluded = false;
+  let draftKindHint: 'file' | 'folder' = 'file';
+  let draftPathValidation: PathValidation | null = null;
+  let draftValidationBusy = false;
   let itemMessage = '';
   let taxonomyTags: string[] = [];
   let taxonomyCategories: string[] = [];
@@ -62,10 +97,31 @@
   let linkCheckBusy = false;
   let linkCheckMessage = '';
   let dragCandidate: { id: number; x: number; y: number; canDrag: boolean } | null = null;
+  let recordQuery = '';
+  let selectedRecordIds: number[] = [];
+  let recordSelectionAnchor: number | null = null;
+  let bulkDeleteBusy = false;
+  let recordDraft: RecordDraft | null = null;
+  let recordValidation: PathValidation | null = null;
+  let recordValidationBusy = false;
+  let recordSaving = false;
+  let recordMessage = '';
+  let transferDialog: 'paste' | 'preview' | null = null;
+  let transferText = '';
+  let transferSource = '';
+  let importPreview: ImportPreviewRow[] = [];
+  let importBusy = false;
+  let importMessage = '';
 
   $: filteredItems = filterItems(items, query, mode, options);
   $: results = sortMode === 'name' ? [...filteredItems].sort((a, b) => a.name.localeCompare(b.name, 'ja')) : filteredItems;
   $: selected = results.find((item) => item.id === selectedId) ?? null;
+  $: recordResults = items.filter((item) => {
+    const term = recordQuery.trim().toLocaleLowerCase();
+    if (!term) return true;
+    return [String(item.id), item.name, item.actualName, item.path, ...item.tags, item.category ?? '']
+      .join(' ').toLocaleLowerCase().includes(term);
+  });
 
   function handleRowPointerDown(event: PointerEvent, item: PathItem) {
     if (event.button !== 0 || !(event.target instanceof Element) || event.target.closest('button')) return;
@@ -107,6 +163,12 @@
     selectedId = items[0]?.id ?? 0;
   }
 
+  function openManagement(section: 'overview' | 'records' = 'overview') {
+    manageOpen = true;
+    manageSection = section;
+    actionMenuId = null;
+  }
+
   function normalizePathKey(path: string) {
     const normalized = path.startsWith('\\\\?\\UNC\\')
       ? `\\\\${path.slice('\\\\?\\UNC\\'.length)}`
@@ -140,7 +202,7 @@
     return {
       id: item.id, name: item.name, actualName: item.actual_name, path: item.path, kind: item.kind,
       extension, tags: item.tags ?? [], category: item.category, memo: item.memo ?? '', favorite: item.favorite,
-      useCount: item.use_count, lastUsedAt, excluded: item.excluded
+      useCount: item.use_count, lastUsedAt, rawLastUsedAt: item.last_used_at, excluded: item.excluded
     };
   }
 
@@ -286,6 +348,8 @@
     draftMemo = '';
     draftFavorite = false;
     draftExcluded = false;
+    draftKindHint = 'file';
+    draftPathValidation = null;
     itemMessage = '';
     showItemEditor = true;
   }
@@ -300,6 +364,8 @@
     draftMemo = item.memo;
     draftFavorite = item.favorite;
     draftExcluded = item.excluded;
+    draftKindHint = item.kind;
+    draftPathValidation = null;
     itemMessage = '';
     showItemEditor = true;
   }
@@ -314,7 +380,11 @@
         directory: kind === 'folder',
         multiple: false
       });
-      if (typeof selectedPath === 'string') draftPath = selectedPath;
+      if (typeof selectedPath === 'string') {
+        draftPath = selectedPath;
+        draftKindHint = kind;
+        draftPathValidation = null;
+      }
     } catch (error) {
       itemMessage = `選択ダイアログを開けませんでした: ${String(error)}`;
     } finally {
@@ -326,6 +396,22 @@
     return [...new Set(draftTags.split(',').map((tag) => tag.trim().replace(/^#/, '')).filter(Boolean))];
   }
 
+  async function validateDraftPath() {
+    if (!draftPath.trim() || draftValidationBusy) return;
+    draftValidationBusy = true;
+    itemMessage = '';
+    try {
+      draftPathValidation = await validateRecordPath(draftPath.trim(), draftKindHint);
+      if (draftPathValidation.normalizedPath) draftPath = draftPathValidation.normalizedPath;
+      if (draftPathValidation.detectedKind) draftKindHint = draftPathValidation.detectedKind;
+    } catch (error) {
+      draftPathValidation = null;
+      itemMessage = String(error);
+    } finally {
+      draftValidationBusy = false;
+    }
+  }
+
   async function saveItem() {
     if (!isTauri() || dataLoading) return;
     itemMessage = '';
@@ -335,10 +421,15 @@
     }
     dataLoading = true;
     try {
+      const validation = await validateRecordPath(draftPath.trim(), draftKindHint);
+      draftPathValidation = validation;
+      const validatedPath = validation.normalizedPath || draftPath.trim();
+      const validatedKind = validation.detectedKind ?? draftKindHint;
       let id = editItemId;
       if (id === null) {
         const created = await invoke<StoredPath>('register_path', {
-          path: draftPath.trim(),
+          path: validatedPath,
+          kindHint: validatedKind,
           name: draftName.trim() || null,
           tags: readDraftTags(),
           category: draftCategory.trim() || null,
@@ -350,7 +441,8 @@
       } else {
         await invoke('update_registered_path', {
           id,
-          path: draftPath.trim(),
+          path: validatedPath,
+          kindHint: validatedKind,
           name: draftName.trim(),
           tags: readDraftTags(),
           category: draftCategory.trim() || null,
@@ -363,6 +455,10 @@
       pendingDropPaths = [];
       await Promise.all([refreshItems(), refreshTaxonomy()]);
       selectedId = id;
+      toast = validation.status === 'exists'
+        ? '登録内容を保存しました'
+        : `登録内容を保存しました。${validation.message}`;
+      window.setTimeout(() => (toast = ''), validation.status === 'exists' ? 2600 : 4200);
     } catch (error) {
       itemMessage = String(error);
     } finally {
@@ -381,17 +477,284 @@
     draftMemo = '';
     draftFavorite = false;
     draftExcluded = false;
+    draftKindHint = 'file';
+    draftPathValidation = null;
     itemMessage = paths.length > 1 ? `${paths.length}件のパスを受け取りました。1件ずつ登録してください。` : '';
     showItemEditor = true;
   }
 
-  async function deleteItem(item: PathItem) {
-    if (!isTauri() || !window.confirm(`「${item.name}」をPathlyの登録から削除しますか？\n元ファイル自体は削除されません。`)) return;
+  async function deleteItem(item: PathItem): Promise<boolean> {
+    if (!isTauri() || !window.confirm(`「${item.name}」をPathlyの登録から削除しますか？\n元ファイル自体は削除されません。`)) return false;
     try {
       await invoke('delete_registered_path', { id: item.id });
       await Promise.all([refreshItems(), refreshTaxonomy()]);
+      return true;
     } catch (error) {
       itemMessage = `登録を削除できませんでした: ${String(error)}`;
+      return false;
+    }
+  }
+
+  async function deleteEditedItem() {
+    if (editItemId === null) return;
+    const item = items.find((candidate) => candidate.id === editItemId);
+    if (!item || !(await deleteItem(item))) return;
+    cancelItemEditor();
+    itemMessage = '';
+    toast = `「${item.name}」を登録解除しました`;
+    window.setTimeout(() => (toast = ''), 2600);
+  }
+
+  function setVisibleRecordSelection(selected: boolean) {
+    const visibleIds = recordResults.map((item) => item.id);
+    selectedRecordIds = selected
+      ? [...new Set([...selectedRecordIds, ...visibleIds])]
+      : selectedRecordIds.filter((id) => !visibleIds.includes(id));
+    if (selected && visibleIds.length) recordSelectionAnchor = visibleIds[0];
+  }
+
+  function toggleRecordSelection(id: number, selected: boolean) {
+    selectedRecordIds = selected
+      ? [...new Set([...selectedRecordIds, id])]
+      : selectedRecordIds.filter((currentId) => currentId !== id);
+    recordSelectionAnchor = id;
+  }
+
+  function handleRecordRowClick(event: MouseEvent, item: PathItem) {
+    if (event.shiftKey) {
+      const anchorIndex = recordResults.findIndex((candidate) => candidate.id === recordSelectionAnchor);
+      const itemIndex = recordResults.findIndex((candidate) => candidate.id === item.id);
+      if (anchorIndex >= 0 && itemIndex >= 0) {
+        const [start, end] = [Math.min(anchorIndex, itemIndex), Math.max(anchorIndex, itemIndex)];
+        const rangeIds = recordResults.slice(start, end + 1).map((candidate) => candidate.id);
+        selectedRecordIds = [...new Set([...selectedRecordIds, ...rangeIds])];
+      } else {
+        toggleRecordSelection(item.id, true);
+      }
+      return;
+    }
+    if (event.ctrlKey || event.metaKey) {
+      toggleRecordSelection(item.id, !selectedRecordIds.includes(item.id));
+      return;
+    }
+    beginRecordEdit(item);
+  }
+
+  async function deleteSelectedRecords() {
+    if (!isTauri() || bulkDeleteBusy || !selectedRecordIds.length) return;
+    const ids = [...selectedRecordIds];
+    const selectedItems = items.filter((item) => ids.includes(item.id));
+    const names = selectedItems.slice(0, 5).map((item) => `・${item.name} (ID: ${item.id})`).join('\n');
+    const more = selectedItems.length > 5 ? `\nほか ${selectedItems.length - 5} 件` : '';
+    if (!window.confirm(`${ids.length}件の登録レコードを削除します。\n関連するタグ情報も削除されます。元ファイル・フォルダーは削除されません。\n\n${names}${more}`)) return;
+    bulkDeleteBusy = true;
+    recordMessage = '';
+    try {
+      await invoke('delete_registered_paths', { ids });
+      if (recordDraft && ids.includes(recordDraft.id)) recordDraft = null;
+      selectedRecordIds = [];
+      recordSelectionAnchor = null;
+      await Promise.all([refreshItems(), refreshTaxonomy()]);
+      recordMessage = `${ids.length}件のレコードを削除しました。`;
+    } catch (error) {
+      recordMessage = `一括削除できませんでした。変更は反映されていません: ${String(error)}`;
+    } finally {
+      bulkDeleteBusy = false;
+    }
+  }
+
+  function beginRecordEdit(item: PathItem) {
+    recordDraft = {
+      id: item.id,
+      actualName: item.actualName,
+      name: item.name,
+      path: item.path,
+      kindHint: item.kind,
+      tags: item.tags.join(', '),
+      category: item.category ?? '',
+      memo: item.memo,
+      favorite: item.favorite,
+      excluded: item.excluded,
+      useCount: item.useCount,
+      lastUsedAt: item.rawLastUsedAt ?? ''
+    };
+    recordValidation = null;
+    recordMessage = '';
+  }
+
+  async function validateRecordPath(path: string, kindHint?: 'file' | 'folder'): Promise<PathValidation> {
+    if (!isTauri()) throw new Error('パス検証はデスクトップ版で利用できます。');
+    return invoke<PathValidation>('validate_path', { path, kindHint: kindHint ?? null });
+  }
+
+  async function validateRecordDraft() {
+    if (!recordDraft || recordValidationBusy) return;
+    recordValidationBusy = true;
+    recordMessage = '';
+    try {
+      recordValidation = await validateRecordPath(recordDraft.path.trim(), recordDraft.kindHint);
+      if (recordValidation.normalizedPath) recordDraft.path = recordValidation.normalizedPath;
+      if (recordValidation.detectedKind) recordDraft.kindHint = recordValidation.detectedKind;
+    } catch (error) {
+      recordValidation = null;
+      recordMessage = String(error);
+    } finally {
+      recordValidationBusy = false;
+    }
+  }
+
+  function recordWriteFromDraft(draft: RecordDraft): RecordWrite {
+    return {
+      id: draft.id,
+      name: draft.name.trim(),
+      path: draft.path.trim(),
+      kindHint: draft.kindHint,
+      tags: [...new Set(draft.tags.split(',').map((tag) => tag.trim().replace(/^#/, '')).filter(Boolean))],
+      category: draft.category.trim() || null,
+      memo: draft.memo,
+      favorite: draft.favorite,
+      excluded: draft.excluded,
+      useCount: Math.max(0, Math.trunc(Number(draft.useCount) || 0)),
+      lastUsedAt: draft.lastUsedAt.trim() || null
+    };
+  }
+
+  async function saveRecordDraft() {
+    if (!recordDraft || recordSaving || !isTauri()) return;
+    if (!recordDraft.name.trim() || !recordDraft.path.trim()) {
+      recordMessage = '名前とパスを入力してください。';
+      return;
+    }
+    recordSaving = true;
+    recordMessage = '';
+    try {
+      const validation = await validateRecordPath(recordDraft.path.trim(), recordDraft.kindHint);
+      recordValidation = validation;
+      const record = recordWriteFromDraft({
+        ...recordDraft,
+        path: validation.normalizedPath || recordDraft.path,
+        kindHint: validation.detectedKind ?? recordDraft.kindHint
+      });
+      await invoke<StoredPath[]>('apply_record_batch', { records: [record] });
+      await Promise.all([refreshItems(), refreshTaxonomy()]);
+      const refreshed = items.find((item) => item.id === recordDraft?.id);
+      if (refreshed) beginRecordEdit(refreshed);
+      recordMessage = validation.status === 'exists'
+        ? 'レコードを保存しました。'
+        : `レコードを保存しました。${validation.message}`;
+    } catch (error) {
+      recordMessage = `保存できませんでした: ${String(error)}`;
+    } finally {
+      recordSaving = false;
+    }
+  }
+
+  async function copyRecordsAsTsv() {
+    try {
+      await navigator.clipboard.writeText(serializeRecords(recordResults, '\t'));
+      toast = `${recordResults.length}件をExcel向け形式でコピーしました`;
+    } catch (error) {
+      toast = `コピーできませんでした: ${String(error)}`;
+    }
+    window.setTimeout(() => (toast = ''), 2600);
+  }
+
+  async function exportRecordsCsv() {
+    if (!isTauri()) return;
+    const content = `\uFEFF${serializeRecords(recordResults, ',')}`;
+    try {
+      const path = await saveDialog({
+        title: 'レコードをCSVで保存',
+        defaultPath: `pathly-records-${new Date().toISOString().slice(0, 10)}.csv`,
+        filters: [{ name: 'CSV', extensions: ['csv'] }]
+      });
+      if (!path) return;
+      await invoke('write_records_text_file', { path, content });
+      toast = `${recordResults.length}件をCSVへ保存しました`;
+    } catch (error) {
+      toast = `CSVを保存できませんでした: ${String(error)}`;
+    }
+    window.setTimeout(() => (toast = ''), 2600);
+  }
+
+  function openPasteDialog() {
+    transferText = '';
+    transferSource = 'Excel / TSV';
+    importMessage = '';
+    importPreview = [];
+    transferDialog = 'paste';
+  }
+
+  async function importRecordsCsv() {
+    if (!isTauri()) return;
+    try {
+      const path = await openDialog({ title: '取り込むCSVを選択', multiple: false, filters: [{ name: 'CSV', extensions: ['csv'] }] });
+      if (typeof path !== 'string') return;
+      transferText = await invoke<string>('read_records_text_file', { path });
+      transferSource = path.split(/[\\/]/).pop() ?? path;
+      await buildImportPreview(',', transferText);
+    } catch (error) {
+      importMessage = `CSVを読み込めませんでした: ${String(error)}`;
+      transferDialog = 'preview';
+    }
+  }
+
+  async function buildImportPreview(delimiter: ',' | '\t', text: string) {
+    importBusy = true;
+    importMessage = '';
+    transferDialog = 'preview';
+    try {
+      const parsed = parseRecordTransfer(text, delimiter);
+      const existingIds = new Set(items.map((item) => item.id));
+      const idCounts = new Map<number, number>();
+      for (const row of parsed) {
+        if (row.record?.id !== undefined) idCounts.set(row.record.id, (idCounts.get(row.record.id) ?? 0) + 1);
+      }
+      importPreview = await Promise.all(parsed.map(async (row): Promise<ImportPreviewRow> => {
+        if (!row.record) return { ...row, action: 'エラー' };
+        if (row.record.id !== undefined && !existingIds.has(row.record.id)) {
+          return { ...row, action: 'エラー', error: `ID ${row.record.id} は存在しません。更新対象は既存IDで指定してください。` };
+        }
+        if (row.record.id !== undefined && (idCounts.get(row.record.id) ?? 0) > 1) {
+          return { ...row, action: 'エラー', error: `ID ${row.record.id} が複数行にあります。` };
+        }
+        try {
+          const validation = await validateRecordPath(row.record.path, row.record.kindHint);
+          if (!row.record.kindHint && !validation.detectedKind) {
+            return { ...row, validation, action: 'エラー', error: 'パスを確認できないためkindの指定が必要です。' };
+          }
+          row.record.path = validation.normalizedPath || row.record.path;
+          row.record.kindHint = validation.detectedKind ?? row.record.kindHint;
+          const duplicatePath = items.some((item) => item.id !== row.record?.id && normalizePathKey(item.path) === normalizePathKey(row.record?.path ?? ''));
+          return { ...row, validation, duplicatePath, action: row.record.id === undefined ? '追加' : '更新' };
+        } catch (error) {
+          return { ...row, action: 'エラー', error: String(error) };
+        }
+      }));
+      if (!importPreview.length) importMessage = '取り込めるデータ行がありません。';
+    } catch (error) {
+      importPreview = [];
+      importMessage = String(error);
+    } finally {
+      importBusy = false;
+    }
+  }
+
+  async function applyImportPreview() {
+    if (importBusy || importPreview.some((row) => row.action === 'エラー') || !importPreview.length || !isTauri()) return;
+    importBusy = true;
+    importMessage = '';
+    try {
+      const records = importPreview.flatMap((row) => row.record ? [row.record] : []);
+      await invoke<StoredPath[]>('apply_record_batch', { records });
+      await Promise.all([refreshItems(), refreshTaxonomy()]);
+      const added = records.filter((record) => record.id === undefined).length;
+      importMessage = `${added}件を追加し、${records.length - added}件を更新しました。`;
+      importPreview = [];
+    } catch (error) {
+      importMessage = `反映できませんでした。変更は適用されていません: ${String(error)}`;
+    } finally {
+      importBusy = false;
     }
   }
 
@@ -543,7 +906,7 @@
         <span aria-hidden="true">↗</span>
       </button>
     </nav>
-    <button class:active={manageOpen} class="nav-button manage-button" aria-label="管理" title="管理" onclick={() => (manageOpen = true)}>
+    <button class:active={manageOpen} class="nav-button manage-button" aria-label="管理" title="管理" onclick={() => openManagement()}>
       <span aria-hidden="true">⚙</span>
     </button>
   </aside>
@@ -551,7 +914,7 @@
   <main class="workspace">
     <header class="topbar">
       <div>
-        <h1>{manageOpen ? '管理' : query ? '検索結果' : mode === 'all' ? 'ホーム' : mode === 'favorites' ? 'お気に入り' : mode === 'frequent' ? 'よく使う' : '最近使った'}</h1>
+        <h1>{manageOpen ? (manageSection === 'records' ? 'レコード' : '管理') : query ? '検索結果' : mode === 'all' ? 'ホーム' : mode === 'favorites' ? 'お気に入り' : mode === 'frequent' ? 'よく使う' : '最近使った'}</h1>
       </div>
       {#if !manageOpen}
         <div class="search-wrap">
@@ -577,6 +940,11 @@
     </header>
 
     {#if manageOpen}
+      <div class="management-switcher" aria-label="管理メニュー">
+        <button class:current={manageSection === 'overview'} onclick={() => (manageSection = 'overview')}>設定</button>
+        <button class:current={manageSection === 'records'} onclick={() => (manageSection = 'records')}>レコード</button>
+      </div>
+      {#if manageSection === 'overview'}
       <section class="management" aria-labelledby="management-title">
         <div class="management-heading"><div class="empty-icon" aria-hidden="true">⚙</div><div><h2 id="management-title">管理</h2><p>登録項目とアプリの保存先を管理します。</p></div><button class="primary management-add" onclick={beginNewItem}>＋ 登録</button></div>
         <section class="settings-card item-management" aria-labelledby="items-title">
@@ -588,7 +956,6 @@
                   <div class="managed-type" aria-hidden="true">{item.kind === 'folder' ? 'DIR' : item.extension}</div>
                   <div class="managed-info"><strong>{item.name}</strong><span title={item.path}>{narrowPath(item.path, 64)}</span><div class="tags">{#each item.tags as tag}<span>#{tag}</span>{/each}{#if item.excluded}<span class="excluded-tag">検索対象外</span>{/if}</div></div>
                   <button class="text-button" onclick={() => beginEditItem(item)}>編集</button>
-                  <button class="text-button danger-button" onclick={() => deleteItem(item)}>削除</button>
                 </div>
               {/each}
             </div>
@@ -617,6 +984,72 @@
         </section>
         <div class="management-note">確認を実行したときだけ、登録済みの各パスへアクセスします。自動走査やPC全体のインデックス作成は行いません。</div>
       </section>
+      {:else}
+      <section class="records-management" aria-labelledby="records-title">
+        <div class="records-toolbar">
+          <div><h2 id="records-title">レコード</h2><p>SQLiteに保存された登録情報を確認・編集します。Ctrl/⌘+クリックで追加選択、Shift+クリックで範囲選択できます。</p></div>
+          <div class="records-actions">
+            <button class="secondary danger-button" disabled={!selectedRecordIds.length || bulkDeleteBusy} onclick={() => void deleteSelectedRecords()}>{bulkDeleteBusy ? '削除中…' : `選択を削除 (${selectedRecordIds.length})`}</button>
+            <button class="secondary" onclick={() => void copyRecordsAsTsv()}>Excelへコピー</button>
+            <button class="secondary" onclick={openPasteDialog}>Excelから貼り付け</button>
+            <button class="secondary" onclick={() => void exportRecordsCsv()}>CSV書き出し</button>
+            <button class="secondary" onclick={() => void importRecordsCsv()}>CSV読み込み</button>
+          </div>
+        </div>
+        <div class="record-search-row">
+          <span aria-hidden="true">⌕</span>
+          <input bind:value={recordQuery} aria-label="レコードを検索" placeholder="ID、名前、ファイル名、パス、タグ、カテゴリを検索" />
+          <span>{#if selectedRecordIds.length}<strong>{selectedRecordIds.length}件選択・</strong>{/if}{recordResults.length} / {items.length}件</span>
+        </div>
+        {#if recordMessage}<p class:success={recordMessage.includes('削除しました')} class="record-message" role="status">{recordMessage}</p>{/if}
+        <div class="records-grid">
+          <section class="records-table-card" aria-label="レコード一覧">
+            <div class="records-table-head"><input type="checkbox" aria-label="表示中のレコードをすべて選択" checked={recordResults.length > 0 && recordResults.every((item) => selectedRecordIds.includes(item.id))} onchange={(event) => setVisibleRecordSelection(event.currentTarget.checked)} /><span>ID</span><span>名前</span><span>種別</span><span>パス</span><span>操作</span></div>
+            <div class="records-table-body">
+              {#each recordResults as item (item.id)}
+                <div class:active={recordDraft?.id === item.id} class:bulk-selected={selectedRecordIds.includes(item.id)} class="record-table-line">
+                  <input type="checkbox" aria-label={`${item.name}を選択`} checked={selectedRecordIds.includes(item.id)} onchange={(event) => toggleRecordSelection(item.id, event.currentTarget.checked)} />
+                  <button class="record-table-row" onclick={(event) => handleRecordRowClick(event, item)}>
+                    <span class="record-id">{item.id}</span>
+                    <span class="record-name"><strong>{item.name}</strong><small>{item.actualName}</small></span>
+                    <span>{item.kind === 'folder' ? 'フォルダー' : 'ファイル'}</span>
+                    <span class="record-path" title={item.path}>{item.path}</span>
+                    <span class="record-edit-label">編集</span>
+                  </button>
+                </div>
+              {:else}
+                <div class="records-empty">該当するレコードはありません。</div>
+              {/each}
+            </div>
+          </section>
+
+          <aside class="record-editor" aria-label="レコード編集">
+            {#if recordDraft}
+              <div class="record-editor-heading"><div><span>レコードID</span><strong>{recordDraft.id}</strong></div><button class="text-button danger-button" onclick={async () => { const item = items.find((candidate) => candidate.id === recordDraft?.id); if (item && await deleteItem(item)) recordDraft = null; }}>削除</button></div>
+              <div class="record-form">
+                <label>実ファイル名 <span>読み取り専用</span><input value={recordDraft.actualName} readonly /></label>
+                <label>表示名<input bind:value={recordDraft.name} /></label>
+                <label>パス<textarea bind:value={recordDraft.path} rows="3" spellcheck="false" oninput={() => (recordValidation = null)}></textarea></label>
+                <div class="validation-row"><button class="secondary" disabled={recordValidationBusy || !recordDraft.path.trim()} onclick={() => void validateRecordDraft()}>{recordValidationBusy ? '確認中…' : 'パスを確認'}</button>
+                  {#if recordValidation}<span class:ok={recordValidation.status === 'exists'} class:warning={recordValidation.status !== 'exists'}>{recordValidation.message}</span>{/if}
+                </div>
+                <label>種別 <span>{recordValidation?.status === 'exists' ? 'パスから判定' : 'パスが見つからない場合に使用'}</span><select bind:value={recordDraft.kindHint} disabled={recordValidation?.status === 'exists'}><option value="file">ファイル</option><option value="folder">フォルダー</option></select></label>
+                <label>タグ <span>カンマ区切り</span><input bind:value={recordDraft.tags} /></label>
+                <label>カテゴリ<input bind:value={recordDraft.category} /></label>
+                <label>メモ <span>検索対象外</span><textarea bind:value={recordDraft.memo} rows="3"></textarea></label>
+                <div class="record-form-split"><label>利用回数<input type="number" min="0" step="1" bind:value={recordDraft.useCount} /></label><label>最終利用日時 <span>ISO 8601</span><input bind:value={recordDraft.lastUsedAt} placeholder="2026-09-22T12:00:00Z" /></label></div>
+                <div class="form-checks"><label><input type="checkbox" bind:checked={recordDraft.favorite} /> お気に入り</label><label><input type="checkbox" bind:checked={recordDraft.excluded} /> 検索対象外</label></div>
+                {#if recordMessage}<p class:success={recordMessage.startsWith('レコードを保存')} class="record-message" role="status">{recordMessage}</p>{/if}
+                <div class="record-save-actions"><button class="primary" disabled={recordSaving || !recordDraft.name.trim() || !recordDraft.path.trim()} onclick={() => void saveRecordDraft()}>{recordSaving ? '保存中…' : '変更を保存'}</button></div>
+              </div>
+            {:else}
+              <div class="record-editor-empty"><span aria-hidden="true">▤</span><strong>編集するレコードを選択</strong><p>一覧の行を選ぶと、保存値を直接確認できます。</p></div>
+            {/if}
+          </aside>
+        </div>
+        <p class="records-note">IDがある取込行だけを更新し、空のIDは新規追加します。パス一致による上書きは行いません。実ファイル自体を削除・変更することもありません。</p>
+      </section>
+      {/if}
     {:else}
       {#if showOptions}
         <div class="options-panel" aria-label="検索オプション">
@@ -642,14 +1075,13 @@
                     <span class="item-copy"><strong>{item.name}</strong><span class="tags">{#each item.tags as tag}<span>#{tag}</span>{/each}</span></span>
                   </button>
                   <span class="path" title={item.path}>{narrowPath(item.path)}</span>
-                  <button class="icon-button" aria-label={`${item.name}の場所を開く`} title="場所を開く" onclick={(event) => { event.stopPropagation(); openLocation(item); }}>↗</button>
+                  <button class="icon-button action-icon-button" aria-label={`${item.name}の場所を開く`} title="場所を開く" onclick={(event) => { event.stopPropagation(); openLocation(item); }}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7.5h7l2 2h9v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M3 7V5a2 2 0 0 1 2-2h5l2 2h5"/></svg></button>
                   <button class="icon-button subdued" aria-label={`${item.name}のその他の操作`} title="その他の操作" aria-expanded={actionMenuId === item.id} onclick={(event) => { event.stopPropagation(); select(item); actionMenuId = actionMenuId === item.id ? null : item.id; }}>•••</button>
                   {#if actionMenuId === item.id}
                     <div class="item-context-menu" aria-label={`${item.name}の操作`}>
                       <button onclick={(event) => { event.stopPropagation(); actionMenuId = null; void openItem(item); }}>開く</button>
                       <button onclick={(event) => { event.stopPropagation(); actionMenuId = null; void openLocation(item); }}>保存場所を開く</button>
                       <button onclick={(event) => { event.stopPropagation(); actionMenuId = null; beginEditItem(item); }}>編集</button>
-                      <button class="danger-button" onclick={(event) => { event.stopPropagation(); actionMenuId = null; void deleteItem(item); }}>登録解除</button>
                     </div>
                   {/if}
                 </article>
@@ -665,7 +1097,12 @@
           {#if selected}
             <div class="detail-top"><span class="detail-label">選択中</span><span class="status-dot">登録済み</span></div>
             <div class="detail-title"><span class:item-folder={selected.kind === 'folder'} class="type-badge large">{selected.kind === 'folder' ? 'DIR' : selected.extension}</span><h2>{selected.name}</h2></div>
-            <div class="detail-actions"><button class="primary" onclick={() => openItem(selected)}>開く <span>Enter</span></button><button class="secondary" onclick={() => openLocation(selected)} aria-label="保存場所を開く">場所を開く</button></div>
+            <div class="detail-actions" aria-label="項目の操作">
+              <button class="icon-button action-icon-button detail-open" aria-label={`${selected.name}を開く`} title="開く (Enter)" onclick={() => openItem(selected)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M10 14 21 3M19 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h6" /></svg></button>
+              <button class="icon-button action-icon-button" aria-label="保存場所を開く" title="保存場所を開く" onclick={() => openLocation(selected)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7.5h7l2 2h9v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M3 7V5a2 2 0 0 1 2-2h5l2 2h5"/></svg></button>
+              <button class="icon-button action-icon-button" aria-label="編集" title="編集" onclick={() => beginEditItem(selected)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 5 5 5M4 20l4.2-.9L19 8.3a2.1 2.1 0 0 0-3-3L5.2 16.1z"/><path d="M13 20h8"/></svg></button>
+              <button class="icon-button action-icon-button" aria-label="パスをコピー" title="パスをコピー" onclick={() => copyPath(selected.path)}><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg></button>
+            </div>
             <dl>
               <div><dt>タグ</dt><dd class="detail-tags">{#each selected.tags as tag}<span>#{tag}</span>{/each}</dd></div>
               <div><dt>ファイル名</dt><dd>{selected.actualName}</dd></div>
@@ -675,7 +1112,6 @@
               <div><dt>利用回数</dt><dd>{selected.useCount}回</dd></div>
               {#if selected.memo}<div><dt>メモ</dt><dd>{selected.memo}</dd></div>{/if}
             </dl>
-            <div class="detail-footer"><button class="copy-path-button" aria-label="パスをコピー" title="パスをコピー" onclick={() => copyPath(selected.path)}>⧉</button></div>
           {:else}
             <div class="detail-empty">項目を選択すると詳細を表示します。</div>
           {/if}
@@ -691,8 +1127,11 @@
         {#if pendingDropPaths.length > 1}<p class="storage-note">複数のパスをドロップしました。1件ずつ登録するため、現在のパスを登録した後に残りを再度ドロップしてください。</p>{/if}
         <form onsubmit={(event) => { event.preventDefault(); void saveItem(); }}>
           <label for="draft-path">ファイルまたはフォルダーのパス</label>
-          <input id="draft-path" bind:value={draftPath} placeholder="例: C:\\Users\\name\\Documents\\report.pdf" required spellcheck="false" />
+          <input id="draft-path" bind:value={draftPath} oninput={() => (draftPathValidation = null)} placeholder="例: C:\\Users\\name\\Documents\\report.pdf" required spellcheck="false" />
           <div class="path-picker-actions"><button class="secondary" type="button" disabled={pickerBusy} onclick={() => chooseRegistrationPath('file')}>ファイルを選ぶ</button><button class="secondary" type="button" disabled={pickerBusy} onclick={() => chooseRegistrationPath('folder')}>フォルダーを選ぶ</button></div>
+          <div class="registration-validation"><button class="secondary" type="button" disabled={draftValidationBusy || !draftPath.trim()} onclick={() => void validateDraftPath()}>{draftValidationBusy ? '確認中…' : 'パスを確認'}</button>{#if draftPathValidation}<span class:ok={draftPathValidation.status === 'exists'}>{draftPathValidation.message}</span>{/if}</div>
+          <label for="draft-kind">種別 <span>{draftPathValidation?.status === 'exists' ? 'パスから判定' : 'パスが見つからない場合に使用'}</span></label>
+          <select id="draft-kind" class="dialog-select" bind:value={draftKindHint} disabled={draftPathValidation?.status === 'exists'}><option value="file">ファイル</option><option value="folder">フォルダー</option></select>
           <label for="draft-name">名前</label>
           <input id="draft-name" bind:value={draftName} placeholder="空欄ならファイル名から作成" />
           <div class="form-columns"><div><label for="draft-tags">タグ <span>カンマ区切り</span></label><input id="draft-tags" bind:value={draftTags} placeholder="例: 企画, 月次" list="known-tags" /><datalist id="known-tags">{#each taxonomyTags as tag}<option value={tag}></option>{/each}</datalist></div><div><label for="draft-category">カテゴリ <span>1つまで</span></label><input id="draft-category" bind:value={draftCategory} placeholder="任意" list="known-categories" /><datalist id="known-categories">{#each taxonomyCategories as category}<option value={category}></option>{/each}</datalist></div></div>
@@ -700,7 +1139,7 @@
           <textarea id="draft-memo" bind:value={draftMemo} rows="3" placeholder="補足情報"></textarea>
           <div class="form-checks"><label><input type="checkbox" bind:checked={draftFavorite} /> お気に入り</label><label><input type="checkbox" bind:checked={draftExcluded} /> 検索対象外</label></div>
           {#if itemMessage}<p class="storage-message error" role="status">{itemMessage}</p>{/if}
-          <div class="dialog-actions"><button class="secondary" type="button" onclick={cancelItemEditor}>キャンセル</button><button class="primary" type="submit" disabled={dataLoading}>{dataLoading ? '保存中…' : '保存する'}</button></div>
+          <div class="dialog-actions">{#if editItemId !== null}<button class="secondary danger-button dialog-unregister" type="button" disabled={dataLoading} onclick={() => void deleteEditedItem()}>登録解除</button>{/if}<button class="secondary" type="button" onclick={cancelItemEditor}>キャンセル</button><button class="primary" type="submit" disabled={dataLoading}>{dataLoading ? '保存中…' : '保存する'}</button></div>
         </form>
           </div>
     </div>
@@ -713,6 +1152,44 @@
         <label for="taxonomy-new-name">新しい名前</label><input id="taxonomy-new-name" bind:value={taxonomyDraft} />
         <p class="storage-note">該当するすべての登録項目に反映します。</p>
         <div class="dialog-actions"><button class="secondary" onclick={() => (taxonomyEditor = null)}>キャンセル</button><button class="primary" disabled={!taxonomyDraft.trim()} onclick={saveTaxonomyRename}>変更する</button></div>
+      </div>
+    </div>
+  {/if}
+
+  {#if transferDialog === 'paste'}
+    <div class="dialog-scrim" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) transferDialog = null; }}>
+      <div class="item-dialog transfer-dialog" role="dialog" aria-modal="true" aria-labelledby="paste-dialog-title" tabindex="-1">
+        <div class="dialog-heading"><div><div class="eyebrow">Excel / TSV</div><h2 id="paste-dialog-title">レコードを貼り付け</h2></div><button class="icon-button" aria-label="閉じる" onclick={() => (transferDialog = null)}>×</button></div>
+        <p class="transfer-help">「Excelへコピー」で取得したヘッダー付きの表を貼り付けてください。IDが空の行は追加、既存IDの行は更新として確認します。</p>
+        <textarea class="transfer-textarea" bind:value={transferText} rows="12" placeholder="id&#9;name&#9;actual_name&#9;kind&#9;path…" spellcheck="false"></textarea>
+        {#if importMessage}<p class="record-message" role="status">{importMessage}</p>{/if}
+        <div class="dialog-actions"><button class="secondary" onclick={() => (transferDialog = null)}>キャンセル</button><button class="primary" disabled={!transferText.trim() || importBusy} onclick={() => { transferSource = 'Excel / TSV'; void buildImportPreview('\t', transferText); }}>{importBusy ? '確認中…' : '内容を確認'}</button></div>
+      </div>
+    </div>
+  {/if}
+
+  {#if transferDialog === 'preview'}
+    <div class="dialog-scrim" role="presentation" onclick={(event) => { if (event.target === event.currentTarget && !importBusy) transferDialog = null; }}>
+      <div class="item-dialog transfer-dialog preview-dialog" role="dialog" aria-modal="true" aria-labelledby="preview-dialog-title" tabindex="-1">
+        <div class="dialog-heading"><div><div class="eyebrow">{transferSource || 'インポート'}</div><h2 id="preview-dialog-title">反映内容を確認</h2></div><button class="icon-button" aria-label="閉じる" disabled={importBusy} onclick={() => (transferDialog = null)}>×</button></div>
+        {#if importBusy}<div class="import-loading">パスとレコードを確認しています…</div>{/if}
+        {#if importMessage}<p class="record-message" role="status">{importMessage}</p>{/if}
+        {#if importPreview.length}
+          <div class="preview-summary"><span>追加 {importPreview.filter((row) => row.action === '追加').length}件</span><span>更新 {importPreview.filter((row) => row.action === '更新').length}件</span><span class:error={importPreview.some((row) => row.action === 'エラー')}>エラー {importPreview.filter((row) => row.action === 'エラー').length}件</span></div>
+          <div class="import-preview-table">
+            <div class="import-preview-head"><span>行</span><span>処理</span><span>ID / 名前</span><span>パス確認</span></div>
+            {#each importPreview as row}
+              <div class:error-row={row.action === 'エラー'} class="import-preview-row">
+                <span>{row.rowNumber}</span>
+                <span class:preview-error={row.action === 'エラー'} class="preview-action">{row.action}</span>
+                <span><strong>{row.record?.id ?? '新規'} / {row.record?.name ?? '—'}</strong>{#if row.error}<small>{row.error}</small>{/if}</span>
+                <span>{row.validation?.status === 'exists' ? '存在を確認' : row.validation?.message ?? '未確認'}{#if row.duplicatePath}<small class="duplicate-warning">同じパスのレコードがあります（登録可）</small>{/if}</span>
+              </div>
+            {/each}
+          </div>
+          <p class="transfer-help">actual_nameは参照用で、取込時はパスから再判定します。1行でもエラーがある場合は反映できません。</p>
+        {/if}
+        <div class="dialog-actions"><button class="secondary" disabled={importBusy} onclick={() => (transferDialog = null)}>閉じる</button><button class="primary" disabled={importBusy || !importPreview.length || importPreview.some((row) => row.action === 'エラー')} onclick={() => void applyImportPreview()}>{importBusy ? '処理中…' : 'すべて反映'}</button></div>
       </div>
     </div>
   {/if}

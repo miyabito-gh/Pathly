@@ -14,6 +14,7 @@ export type PathItem = {
   favorite: boolean;
   useCount: number;
   lastUsedAt?: string;
+  rawLastUsedAt?: string | null;
   excluded: boolean;
 };
 
