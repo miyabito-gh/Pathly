@@ -29,6 +29,26 @@ pub struct BrokenPath {
     pub id: i64,
     pub name: String,
     pub path: String,
+    pub status: PathCheckStatus,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum PathCheckStatus {
+    Missing,
+    Unavailable,
+}
+
+fn path_check_status(
+    metadata_result: std::io::Result<std::fs::Metadata>,
+) -> Option<PathCheckStatus> {
+    match metadata_result {
+        Ok(_) => None,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Some(PathCheckStatus::Missing)
+        }
+        Err(_) => Some(PathCheckStatus::Unavailable),
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -239,8 +259,7 @@ impl PathRepository for SqlitePathRepository {
     }
 
     fn get(&self, id: i64) -> RepositoryResult<RegisteredPath> {
-        SqlitePathRepository::get(self, id)
-            .map_err(RepositoryError::from)
+        SqlitePathRepository::get(self, id).map_err(RepositoryError::from)
     }
     fn apply_record_batch(
         &self,
@@ -482,12 +501,15 @@ impl SqlitePathRepository {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 path: row.get(2)?,
+                status: PathCheckStatus::Missing,
             })
         })?;
         let mut broken = Vec::new();
         for row in rows {
             let item = row?;
-            if !Path::new(&item.path).exists() {
+            if let Some(status) = path_check_status(std::fs::metadata(&item.path)) {
+                let mut item = item;
+                item.status = status;
                 broken.push(item);
             }
         }
@@ -1441,8 +1463,22 @@ mod tests {
         assert_eq!(broken[0].id, 1);
         assert_eq!(broken[0].name, "Missing item");
         assert_eq!(broken[0].path, root.join("missing.txt").to_string_lossy());
+        assert_eq!(broken[0].status, PathCheckStatus::Missing);
         drop(repository);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn link_check_classifies_uncheckable_metadata_as_unavailable() {
+        let error = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        assert_eq!(
+            path_check_status(Err(error)),
+            Some(PathCheckStatus::Unavailable)
+        );
+        assert_eq!(
+            path_check_status(Err(std::io::Error::from(std::io::ErrorKind::NotFound))),
+            Some(PathCheckStatus::Missing)
+        );
     }
 
     #[test]

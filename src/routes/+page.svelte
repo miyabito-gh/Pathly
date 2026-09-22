@@ -3,7 +3,7 @@
   import { invoke, isTauri } from '@tauri-apps/api/core';
   import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
   import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
-  import { filterItems, narrowPath, type SearchOptions } from '$lib/search';
+  import { filterItems, narrowPath, sortItems, type SearchOptions, type SortMode } from '$lib/search';
   import { sampleItems, type HomeMode, type PathItem } from '$lib/pathItem';
   import { parseRecordTransfer, serializeRecords, type ParsedRecordRow, type RecordWrite } from '$lib/recordTransfer';
 
@@ -56,7 +56,7 @@
   let mode: HomeMode = 'all';
   let query = '';
   let selectedId = 1;
-  let sortMode: 'frequency' | 'name' = 'frequency';
+  let sortMode: SortMode = 'frequency';
   let searchHistory: string[] = [];
   let historyOpen = false;
   let manageOpen = false;
@@ -74,6 +74,8 @@
   let actionMenuId: number | null = null;
   let editItemId: number | null = null;
   let pendingDropPaths: string[] = [];
+  let dropQueueTotal = 0;
+  let dropQueueCompleted = 0;
   let showItemEditor = false;
   let pickerBusy = false;
   let dropActive = false;
@@ -93,7 +95,7 @@
   let taxonomyCategories: string[] = [];
   let taxonomyEditor: { kind: 'tag' | 'category'; oldName: string } | null = null;
   let taxonomyDraft = '';
-  let brokenPaths: { id: number; name: string; path: string }[] = [];
+  let brokenPaths: { id: number; name: string; path: string; status: 'missing' | 'unavailable' }[] = [];
   let linkCheckBusy = false;
   let linkCheckMessage = '';
   let dragCandidate: { id: number; x: number; y: number; canDrag: boolean } | null = null;
@@ -117,7 +119,7 @@
   const listPageSize = 50;
 
   $: filteredItems = filterItems(items, query, mode, options);
-  $: results = sortMode === 'name' ? [...filteredItems].sort((a, b) => a.name.localeCompare(b.name, 'ja')) : filteredItems;
+  $: results = sortItems(filteredItems, sortMode);
   $: pageCount = Math.max(1, Math.ceil(results.length / listPageSize));
   $: listPage = Math.min(listPage, pageCount - 1);
   $: visibleResults = results.slice(listPage * listPageSize, (listPage + 1) * listPageSize);
@@ -128,6 +130,8 @@
     return [String(item.id), item.name, item.actualName, item.path, ...item.tags, item.category ?? '']
       .join(' ').toLocaleLowerCase().includes(term);
   });
+  $: visibleRecordIds = new Set(recordResults.map((item) => item.id));
+  $: hiddenSelectedRecordCount = selectedRecordIds.filter((id) => !visibleRecordIds.has(id)).length;
 
   function handleRowPointerDown(event: PointerEvent, item: PathItem) {
     if (event.button !== 0 || !(event.target instanceof Element) || event.target.closest('button')) return;
@@ -198,7 +202,17 @@
     query = '';
     historyOpen = false;
     showOptions = false;
+    sortMode = 'frequency';
+    listPage = 0;
     selectedId = items[0]?.id ?? 0;
+  }
+
+  function setHomeMode(nextMode: HomeMode) {
+    manageOpen = false;
+    mode = nextMode;
+    query = '';
+    sortMode = nextMode === 'recent' ? 'last-used' : 'frequency';
+    listPage = 0;
   }
 
   function openManagement(section: 'overview' | 'records' = 'overview') {
@@ -338,8 +352,12 @@
     linkCheckBusy = true;
     linkCheckMessage = '';
     try {
-      brokenPaths = await invoke<{ id: number; name: string; path: string }[]>('check_registered_paths');
-      linkCheckMessage = brokenPaths.length ? `${brokenPaths.length}件のリンク切れが見つかりました。` : 'すべての登録先を確認しました。リンク切れはありません。';
+      brokenPaths = await invoke<{ id: number; name: string; path: string; status: 'missing' | 'unavailable' }[]>('check_registered_paths');
+      const missingCount = brokenPaths.filter((item) => item.status === 'missing').length;
+      const unavailableCount = brokenPaths.length - missingCount;
+      linkCheckMessage = brokenPaths.length
+        ? `見つからない項目 ${missingCount}件、状態を確認できない項目 ${unavailableCount}件です。`
+        : 'すべての登録先を確認しました。リンク切れはありません。';
     } catch (error) {
       linkCheckMessage = `リンク切れ確認に失敗しました: ${String(error)}`;
     } finally {
@@ -348,6 +366,7 @@
   }
 
   async function openItem(item: PathItem) {
+    rememberSearch();
     if (!isTauri()) {
       toast = `デスクトップ版で「${item.name}」を開けます`;
     } else {
@@ -389,11 +408,15 @@
   function cancelItemEditor() {
     showItemEditor = false;
     pendingDropPaths = [];
+    dropQueueTotal = 0;
+    dropQueueCompleted = 0;
   }
 
   function beginNewItem() {
     editItemId = null;
     pendingDropPaths = [];
+    dropQueueTotal = 0;
+    dropQueueCompleted = 0;
     draftPath = '';
     draftName = '';
     draftTags = '';
@@ -410,6 +433,8 @@
   function beginEditItem(item: PathItem) {
     editItemId = item.id;
     pendingDropPaths = [];
+    dropQueueTotal = 0;
+    dropQueueCompleted = 0;
     draftPath = item.path;
     draftName = item.name;
     draftTags = item.tags.join(', ');
@@ -468,6 +493,7 @@
   async function saveItem() {
     if (!isTauri() || dataLoading) return;
     itemMessage = '';
+    const savingQueuedDrop = editItemId === null && pendingDropPaths.length > 0;
     const existing = editItemId === null ? null : items.find((item) => item.id === editItemId);
     if (!existing && items.some((item) => normalizePathKey(item.path) === normalizePathKey(draftPath.trim()))) {
       if (!window.confirm('この保存場所はすでに登録されています。同じパスを重複登録しますか？')) return;
@@ -504,14 +530,34 @@
           excluded: draftExcluded
         });
       }
-      showItemEditor = false;
-      pendingDropPaths = [];
+      const continueDropQueue = savingQueuedDrop && pendingDropPaths.length > 1;
+      if (continueDropQueue) {
+        pendingDropPaths = pendingDropPaths.slice(1);
+        dropQueueCompleted += 1;
+      } else {
+        showItemEditor = false;
+        pendingDropPaths = [];
+        dropQueueTotal = 0;
+        dropQueueCompleted = 0;
+      }
       await Promise.all([refreshItems(), refreshTaxonomy()]);
       selectedId = id;
-      toast = validation.status === 'exists'
+      if (continueDropQueue) {
+        draftPath = pendingDropPaths[0];
+        draftName = '';
+        draftTags = '';
+        draftCategory = '';
+        draftMemo = '';
+        draftFavorite = false;
+        draftExcluded = false;
+        draftKindHint = 'file';
+        draftPathValidation = null;
+        itemMessage = '';
+      }
+      toast = savingQueuedDrop ? '' : validation.status === 'exists'
         ? '登録内容を保存しました'
         : `登録内容を保存しました。${validation.message}`;
-      window.setTimeout(() => (toast = ''), validation.status === 'exists' ? 2600 : 4200);
+      if (!savingQueuedDrop) window.setTimeout(() => (toast = ''), validation.status === 'exists' ? 2600 : 4200);
     } catch (error) {
       itemMessage = String(error);
     } finally {
@@ -522,6 +568,8 @@
   async function registerDroppedPaths(paths: string[]) {
     if (!paths.length) return;
     pendingDropPaths = paths;
+    dropQueueTotal = paths.length;
+    dropQueueCompleted = 0;
     editItemId = null;
     draftPath = paths[0];
     draftName = '';
@@ -532,8 +580,48 @@
     draftExcluded = false;
     draftKindHint = 'file';
     draftPathValidation = null;
-    itemMessage = paths.length > 1 ? `${paths.length}件のパスを受け取りました。1件ずつ登録してください。` : '';
+    itemMessage = '';
     showItemEditor = true;
+  }
+
+  function clearRecordSelection() {
+    selectedRecordIds = [];
+    recordSelectionAnchor = null;
+  }
+
+  function manageDialogFocus(node: HTMLElement) {
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const selector = 'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    const focusInitial = () => {
+      const target = node.querySelector<HTMLElement>('input:not([disabled]), textarea:not([disabled]), select:not([disabled]), button:not([disabled])') ?? node;
+      target.focus();
+    };
+    queueMicrotask(focusInitial);
+    function trapTab(event: KeyboardEvent) {
+      if (event.key !== 'Tab') return;
+      const focusable = [...node.querySelectorAll<HTMLElement>(selector)].filter((element) => element.offsetParent !== null);
+      if (!focusable.length) {
+        event.preventDefault();
+        node.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+    node.addEventListener('keydown', trapTab);
+    return {
+      destroy() {
+        node.removeEventListener('keydown', trapTab);
+        if (previousFocus?.isConnected) previousFocus.focus();
+      }
+    };
   }
 
   async function deleteItem(item: PathItem): Promise<boolean> {
@@ -888,10 +976,13 @@
       actionMenuId = null;
       return;
     }
-    if (showItemEditor || taxonomyEditor) {
+    if (showItemEditor || taxonomyEditor || transferDialog) {
       if (event.key === 'Escape') {
-        showItemEditor = false;
+        if (importBusy) return;
+        if (showItemEditor) cancelItemEditor();
         taxonomyEditor = null;
+        transferDialog = null;
+        event.preventDefault();
       }
       return;
     }
@@ -977,13 +1068,13 @@
       <button class:active={!manageOpen && mode === 'all'} class="nav-button" aria-label="ホーム" title="ホーム" onclick={goHome}>
         <span aria-hidden="true">⌂</span>
       </button>
-      <button class:active={!manageOpen && mode === 'favorites'} class="nav-button" aria-label="お気に入り" title="お気に入り" onclick={() => { manageOpen = false; mode = 'favorites'; query = ''; }}>
+      <button class:active={!manageOpen && mode === 'favorites'} class="nav-button" aria-label="お気に入り" title="お気に入り" onclick={() => setHomeMode('favorites')}>
         <span aria-hidden="true">★</span>
       </button>
-      <button class:active={!manageOpen && mode === 'recent'} class="nav-button" aria-label="最近使った" title="最近使った" onclick={() => { manageOpen = false; mode = 'recent'; query = ''; }}>
+      <button class:active={!manageOpen && mode === 'recent'} class="nav-button" aria-label="最近使った" title="最近使った" onclick={() => setHomeMode('recent')}>
         <span aria-hidden="true">◷</span>
       </button>
-      <button class:active={!manageOpen && mode === 'frequent'} class="nav-button" aria-label="よく使う" title="よく使う" onclick={() => { manageOpen = false; mode = 'frequent'; query = ''; }}>
+      <button class:active={!manageOpen && mode === 'frequent'} class="nav-button" aria-label="よく使う" title="よく使う" onclick={() => setHomeMode('frequent')}>
         <span aria-hidden="true">↗</span>
       </button>
     </nav>
@@ -1000,7 +1091,7 @@
       {#if !manageOpen}
         <div class="search-wrap">
           <span class="search-icon" aria-hidden="true">⌕</span>
-          <input bind:this={searchInput} bind:value={query} aria-label="名前とタグを検索" placeholder="名前やタグを検索" />
+          <input bind:this={searchInput} bind:value={query} oninput={() => (listPage = 0)} aria-label="名前、タグ、カテゴリを検索。#でタグ、@でカテゴリを指定" placeholder="名前・タグ・カテゴリを検索（#タグ / @カテゴリ）" />
           <kbd>Ctrl K</kbd>
           <button class:active={historyOpen} class="options-button" aria-label="検索履歴" aria-expanded={historyOpen} title="検索履歴" onclick={() => (historyOpen = !historyOpen)}>◷</button>
           <button class:active={showOptions} class="options-button" aria-label="検索オプション" title="検索オプション" onclick={() => (showOptions = !showOptions)}>☷</button>
@@ -1062,7 +1153,7 @@
         <section class="settings-card link-check-card" aria-labelledby="link-check-title">
           <div class="settings-card-heading"><div><h3 id="link-check-title">リンク切れ確認</h3></div><button class="secondary" disabled={linkCheckBusy} onclick={checkRegisteredPaths}>{linkCheckBusy ? '確認中…' : '今すぐ確認'}</button></div>
           {#if linkCheckMessage}<p class="storage-message" role="status">{linkCheckMessage}</p>{/if}
-          {#if brokenPaths.length}<div class="broken-list">{#each brokenPaths as broken}<div><strong>{broken.name}</strong><span title={broken.path}>{narrowPath(broken.path, 72)}</span><button class="text-button" onclick={() => { const item = items.find((candidate) => candidate.id === broken.id); if (item) beginEditItem(item); }}>確認</button></div>{/each}</div>{/if}
+          {#if brokenPaths.length}<div class="broken-list">{#each brokenPaths as broken}<div><strong>{broken.name}</strong><span title={broken.path}>{narrowPath(broken.path, 72)}</span><small>{broken.status === 'missing' ? '見つかりません' : '状態を確認できません'}</small><button class="text-button" onclick={() => { const item = items.find((candidate) => candidate.id === broken.id); if (item) beginEditItem(item); }}>確認</button></div>{/each}</div>{/if}
         </section>
         <section class="settings-card" aria-labelledby="storage-title">
           <div class="settings-card-heading"><div><h3 id="storage-title">データ保存先</h3></div><span class="setting-badge">SQLite</span></div>
@@ -1079,6 +1170,7 @@
           <div><h2 id="records-title">レコード</h2></div>
           <div class="records-actions">
             <button class="secondary danger-button" disabled={!selectedRecordIds.length || bulkDeleteBusy} onclick={() => void deleteSelectedRecords()}>{bulkDeleteBusy ? '削除中…' : `選択を削除 (${selectedRecordIds.length})`}</button>
+            {#if selectedRecordIds.length}<button class="secondary" disabled={bulkDeleteBusy} onclick={clearRecordSelection}>選択解除</button>{/if}
             <button class="secondary" onclick={() => void copyRecordsAsTsv()}>Excelへコピー</button>
             <button class="secondary" onclick={openPasteDialog}>Excelから貼り付け</button>
             <button class="secondary" onclick={() => void exportRecordsCsv()}>CSV書き出し</button>
@@ -1089,8 +1181,9 @@
         <div class="record-search-row">
           <span aria-hidden="true">⌕</span>
           <input bind:value={recordQuery} aria-label="レコードを検索" placeholder="ID、名前、ファイル名、パス、タグ、カテゴリを検索" />
-          <span>{#if selectedRecordIds.length}<strong>{selectedRecordIds.length}件選択・</strong>{/if}{recordResults.length} / {items.length}件</span>
+          <span>{recordResults.length} / {items.length}件</span>
         </div>
+        {#if selectedRecordIds.length}<p class="record-message" role="status">{selectedRecordIds.length}件選択中{#if hiddenSelectedRecordCount > 0}（検索結果外に{hiddenSelectedRecordCount}件）{/if}。削除ボタンは検索結果外の選択も対象です。</p>{/if}
         {#if recordMessage}<p class:success={recordMessage.includes('削除しました')} class="record-message" role="status">{recordMessage}</p>{/if}
         <div class="records-grid">
           <section class="records-table-card" aria-label="レコード一覧">
@@ -1146,7 +1239,7 @@
           <span>追加の検索対象</span>
           <label><input type="checkbox" bind:checked={options.fileName} /> ファイル名</label>
           <label><input type="checkbox" bind:checked={options.path} /> 保存場所</label>
-          <label class="sort-control">並び順<select bind:value={sortMode}><option value="frequency">利用回数順</option><option value="name">名前順</option></select></label>
+          <label class="sort-control">並び順<select bind:value={sortMode} onchange={() => (listPage = 0)}><option value="frequency">利用回数順</option><option value="last-used">最終利用日時の新しい順</option><option value="name">名前順</option></select></label>
         </div>
       {/if}
 
@@ -1213,10 +1306,10 @@
   </main>
 
   {#if showItemEditor}
-    <div class="dialog-scrim" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) showItemEditor = false; }}>
-          <div class="item-dialog" role="dialog" aria-modal="true" aria-labelledby="item-dialog-title" tabindex="-1">
+    <div class="dialog-scrim" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) cancelItemEditor(); }}>
+          <div class="item-dialog" role="dialog" aria-modal="true" aria-labelledby="item-dialog-title" tabindex="-1" use:manageDialogFocus>
         <div class="dialog-heading"><div><div class="eyebrow">登録項目</div><h2 id="item-dialog-title">{editItemId === null ? 'ファイル・フォルダーを登録' : '登録内容を編集'}</h2></div><button class="icon-button" aria-label="閉じる" onclick={cancelItemEditor}>×</button></div>
-        {#if pendingDropPaths.length > 1}<p class="storage-note">複数のパスをドロップしました。1件ずつ登録するため、現在のパスを登録した後に残りを再度ドロップしてください。</p>{/if}
+        {#if dropQueueTotal > 1}<p class="storage-note" role="status">複数登録 {dropQueueCompleted + 1} / {dropQueueTotal}件目（残り{pendingDropPaths.length}件）</p>{/if}
         <form onsubmit={(event) => { event.preventDefault(); void saveItem(); }}>
           <label for="draft-path">ファイルまたはフォルダーのパス</label>
           <input id="draft-path" bind:value={draftPath} oninput={() => (draftPathValidation = null)} placeholder="例: C:\\Users\\name\\Documents\\report.pdf" required spellcheck="false" />
@@ -1239,7 +1332,7 @@
 
   {#if taxonomyEditor}
     <div class="dialog-scrim" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) taxonomyEditor = null; }}>
-      <div class="item-dialog taxonomy-dialog" role="dialog" aria-modal="true" aria-labelledby="taxonomy-dialog-title" tabindex="-1">
+      <div class="item-dialog taxonomy-dialog" role="dialog" aria-modal="true" aria-labelledby="taxonomy-dialog-title" tabindex="-1" use:manageDialogFocus>
         <div class="dialog-heading"><div><div class="eyebrow">一括変更</div><h2 id="taxonomy-dialog-title">{taxonomyEditor.kind === 'tag' ? 'タグ名を変更' : 'カテゴリ名を変更'}</h2></div><button class="icon-button" aria-label="閉じる" onclick={() => (taxonomyEditor = null)}>×</button></div>
         <label for="taxonomy-new-name">新しい名前</label><input id="taxonomy-new-name" bind:value={taxonomyDraft} />
         <p class="storage-note">該当するすべての登録項目に反映します。</p>
@@ -1250,7 +1343,7 @@
 
   {#if transferDialog === 'paste'}
     <div class="dialog-scrim" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) transferDialog = null; }}>
-      <div class="item-dialog transfer-dialog" role="dialog" aria-modal="true" aria-labelledby="paste-dialog-title" tabindex="-1">
+      <div class="item-dialog transfer-dialog" role="dialog" aria-modal="true" aria-labelledby="paste-dialog-title" tabindex="-1" use:manageDialogFocus>
         <div class="dialog-heading"><div><div class="eyebrow">Excel / TSV</div><h2 id="paste-dialog-title">レコードを貼り付け</h2></div><button class="icon-button" aria-label="閉じる" onclick={() => (transferDialog = null)}>×</button></div>
         <p class="transfer-help">「Excelへコピー」で取得したヘッダー付きの表を貼り付けてください。IDが空の行は追加、既存IDの行は更新として確認します。</p>
         <textarea class="transfer-textarea" bind:value={transferText} rows="12" placeholder="id&#9;name&#9;actual_name&#9;kind&#9;path…" spellcheck="false"></textarea>
@@ -1262,7 +1355,7 @@
 
   {#if transferDialog === 'preview'}
     <div class="dialog-scrim" role="presentation" onclick={(event) => { if (event.target === event.currentTarget && !importBusy) transferDialog = null; }}>
-      <div class="item-dialog transfer-dialog preview-dialog" role="dialog" aria-modal="true" aria-labelledby="preview-dialog-title" tabindex="-1">
+      <div class="item-dialog transfer-dialog preview-dialog" role="dialog" aria-modal="true" aria-labelledby="preview-dialog-title" tabindex="-1" use:manageDialogFocus>
         <div class="dialog-heading"><div><div class="eyebrow">{transferSource || 'インポート'}</div><h2 id="preview-dialog-title">反映内容を確認</h2></div><button class="icon-button" aria-label="閉じる" disabled={importBusy} onclick={() => (transferDialog = null)}>×</button></div>
         {#if importBusy}<div class="import-loading">パスとレコードを確認しています…</div>{/if}
         {#if importMessage}<p class="record-message" role="status">{importMessage}</p>{/if}
