@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { invoke, isTauri } from '@tauri-apps/api/core';
   import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
   import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
@@ -193,7 +193,27 @@
       : Math.min(rows.length - 1, Math.max(0, index + delta));
     const nextItem = results[nextIndex];
     if (nextItem) select(nextItem);
-    rows[nextIndex]?.focus();
+    rows[nextIndex]?.querySelector<HTMLButtonElement>('.item-main')?.focus();
+  }
+
+  async function changeHomePage(delta: number) {
+    const pages: HomeMode[] = ['all', 'favorites', 'recent', 'frequent'];
+    const currentIndex = pages.indexOf(mode);
+    const nextIndex = (currentIndex + delta + pages.length) % pages.length;
+    mode = pages[nextIndex];
+    manageOpen = false;
+    query = '';
+    historyOpen = false;
+    actionMenuId = null;
+    await tick();
+    const firstItem = results[0];
+    if (firstItem) {
+      select(firstItem);
+      await tick();
+      document.querySelector<HTMLButtonElement>('.item-list .item-main')?.focus();
+    } else {
+      document.querySelectorAll<HTMLButtonElement>('.sidebar nav .nav-button')[nextIndex]?.focus();
+    }
   }
 
   function mapStoredPath(item: StoredPath): PathItem {
@@ -824,7 +844,12 @@
       }
       return;
     }
-    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    const editingText = target?.closest('input, textarea, select, [contenteditable="true"]');
+    if ((event.key === 'ArrowLeft' || event.key === 'ArrowRight') && !event.altKey && !event.ctrlKey && !event.metaKey && !manageOpen && !transferDialog && !editingText) {
+      event.preventDefault();
+      void changeHomePage(event.key === 'ArrowRight' ? 1 : -1);
+    } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
       event.preventDefault();
       searchInput?.focus();
     } else if (event.key === 'ArrowDown' && (document.activeElement === searchInput || (document.activeElement as HTMLElement)?.closest('.item-row'))) {
@@ -1087,7 +1112,7 @@
                 </article>
               {/each}
             </div>
-            <div class="keyboard-hint"><kbd>↑</kbd><kbd>↓</kbd> 選択　 <kbd>Enter</kbd> 開く　 <kbd>Ctrl K</kbd> 検索</div>
+            <div class="keyboard-hint"><kbd>↑</kbd><kbd>↓</kbd> 選択　 <kbd>←</kbd><kbd>→</kbd> ページ切替　 <kbd>Enter</kbd> 開く　 <kbd>Ctrl K</kbd> 検索</div>
           {:else}
             <div class="empty-state"><div class="empty-icon">⌕</div><h2>見つかりません</h2><p>名前やタグを変えるか、検索オプションを開いてください。</p></div>
           {/if}
