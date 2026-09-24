@@ -72,6 +72,7 @@ kbd { padding: 3px 6px; border: 1px solid #3c4b5c; border-radius: 5px; color: #9
 .item-main:focus-visible { outline: 2px solid #83c9f2; outline-offset: 3px; }
 .type-badge { display: grid; place-items: center; flex: 0 0 auto; width: 34px; height: 30px; border: 1px solid #35607844; border-radius: 7px; color: #c0e8fc; background: #1f4255; font-size: 8px; font-weight: 800; letter-spacing: .02em; }
 .type-badge.item-folder, .type-badge.large.item-folder { color: #f4d59a; background: #4a3a22; }
+.type-badge.item-url, .type-badge.large.item-url { color: #c9e9bd; background: #29452d; }
 .type-badge.large { width: 44px; height: 39px; font-size: 9px; }
 .item-copy { min-width: 0; }
 .item-copy strong { display: block; overflow-wrap: anywhere; color: #ecf3fa; font-size: 13px; line-height: 1.24; }
@@ -83,6 +84,7 @@ kbd { padding: 3px 6px; border: 1px solid #3c4b5c; border-radius: 5px; color: #9
 .icon-button.subdued { color: #667181; font-size: 12px; }
 .action-icon-button { width: 30px; height: 30px; border: 1px solid transparent; border-radius: 7px; color: #9fb5c7; transition: color .14s ease, border-color .14s ease, background .14s ease; }
 .action-icon-button:hover, .action-icon-button:focus-visible { border-color: #3b5365; color: #e3f4ff; background: #263746; outline: none; }
+.action-icon-button:disabled { opacity: .32; cursor: not-allowed; }
 .action-icon-button svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .favorite-toggle { color: #8295a7; }
 .favorite-toggle:hover, .favorite-toggle:focus-visible { color: #f4cf79; }
@@ -332,6 +334,7 @@ dd { margin: 0; overflow-wrap: anywhere; color: #dbe5ee; font-size: 12px; line-h
 :root[data-theme="light"] .item-main:focus-visible { outline-color: #4f8eb5; }
 :root[data-theme="light"] .type-badge { border-color: #c4d9e5; color: #315b75; background: #e3eff5; }
 :root[data-theme="light"] .type-badge.item-folder, :root[data-theme="light"] .type-badge.large.item-folder { color: #745622; background: #f2e8d2; }
+:root[data-theme="light"] .type-badge.item-url, :root[data-theme="light"] .type-badge.large.item-url { color: #3d6d38; background: #e5f1df; }
 :root[data-theme="light"] .item-copy strong, :root[data-theme="light"] .detail-title h2 { color: #263746; }
 :root[data-theme="light"] .tags, :root[data-theme="light"] .detail-tags { color: #63798b; }
 :root[data-theme="light"] .tags span, :root[data-theme="light"] .detail-tags span { background: #eef2f5; }

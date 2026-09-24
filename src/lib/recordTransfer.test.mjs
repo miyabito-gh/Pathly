@@ -24,3 +24,12 @@ test('blank ID becomes a new record and invalid values are reported per row', as
   assert.equal(result[0].record.kindHint, 'folder');
   assert.match(result[1].error, /id/);
 });
+
+test('URL records accept the url kind', async () => {
+  const { parseRecordTransfer, recordTransferHeaders } = await import('./recordTransfer.ts');
+  const row = ['', 'OpenAI', 'openai.com', 'url', 'https://openai.com/', '', '', '', 'false', 'false', '0', ''];
+  const [parsed] = parseRecordTransfer([recordTransferHeaders.join('\t'), row.join('\t')].join('\n'), '\t');
+  assert.equal(parsed.error, undefined);
+  assert.equal(parsed.record.kindHint, 'url');
+  assert.equal(parsed.record.path, 'https://openai.com/');
+});

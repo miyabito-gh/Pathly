@@ -138,7 +138,7 @@ export function parseRecordTransfer(text: string, delimiter: ',' | '\t'): Parsed
       if (!name) throw new Error('nameは必須です。');
       if (!path) throw new Error('pathは必須です。');
       const rawKind = value('kind');
-      if (rawKind && rawKind !== 'file' && rawKind !== 'folder') throw new Error('kindはfileまたはfolderで指定してください。');
+      if (rawKind && rawKind !== 'file' && rawKind !== 'folder' && rawKind !== 'url') throw new Error('kindはfile、folder、urlのいずれかで指定してください。');
       const rawUseCount = value('use_count');
       const useCount = rawUseCount === '' ? 0 : Number(rawUseCount);
       if (!Number.isSafeInteger(useCount) || useCount < 0) throw new Error('use_countは0以上の整数で指定してください。');

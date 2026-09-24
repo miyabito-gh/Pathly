@@ -1,10 +1,11 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { invoke, isTauri } from '@tauri-apps/api/core';
+  import { listen } from '@tauri-apps/api/event';
   import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
   import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
   import { filterItems, narrowPath, sortItems, type SearchOptions, type SortMode } from '$lib/search';
-  import { sampleItems, type HomeMode, type PathItem } from '$lib/pathItem';
+  import { sampleItems, type HomeMode, type ItemKind, type PathItem } from '$lib/pathItem';
   import { parseRecordTransfer, serializeRecords, type ParsedRecordRow, type RecordWrite } from '$lib/recordTransfer';
 
   type StoredPath = {
@@ -12,7 +13,7 @@
     name: string;
     actual_name: string;
     path: string;
-    kind: 'file' | 'folder';
+    kind: ItemKind;
     tags: string[];
     category?: string | null;
     memo: string;
@@ -27,7 +28,7 @@
     normalizedPath: string;
     actualName: string;
     status: 'exists' | 'missing' | 'unavailable';
-    detectedKind?: 'file' | 'folder' | null;
+    detectedKind?: ItemKind | null;
     message: string;
   };
 
@@ -36,7 +37,7 @@
     actualName: string;
     name: string;
     path: string;
-    kindHint: 'file' | 'folder';
+    kindHint: ItemKind;
     tags: string;
     category: string;
     memo: string;
@@ -87,7 +88,7 @@
   let draftMemo = '';
   let draftFavorite = false;
   let draftExcluded = false;
-  let draftKindHint: 'file' | 'folder' = 'file';
+  let draftKindHint: ItemKind = 'file';
   let draftPathValidation: PathValidation | null = null;
   let draftValidationBusy = false;
   let itemMessage = '';
@@ -118,6 +119,26 @@
   let theme: 'dark' | 'light' = 'dark';
   const listPageSize = 50;
 
+  async function showLaunchSearch(searchQuery: string) {
+    const term = searchQuery.trim();
+    if (!term) return;
+    manageOpen = false;
+    actionMenuId = null;
+    showItemEditor = false;
+    taxonomyEditor = null;
+    transferDialog = null;
+    mode = 'all';
+    query = term;
+    historyOpen = false;
+    showOptions = false;
+    sortMode = 'frequency';
+    listPage = 0;
+    await tick();
+    selectedId = results[0]?.id ?? 0;
+    await tick();
+    searchInput?.focus();
+  }
+
   $: filteredItems = filterItems(items, query, mode, options);
   $: results = sortItems(filteredItems, sortMode);
   $: pageCount = Math.max(1, Math.ceil(results.length / listPageSize));
@@ -135,7 +156,7 @@
 
   function handleRowPointerDown(event: PointerEvent, item: PathItem) {
     if (event.button !== 0 || !(event.target instanceof Element) || event.target.closest('button')) return;
-    dragCandidate = { id: item.id, x: event.clientX, y: event.clientY, canDrag: Boolean(event.target.closest('.item-main')) };
+    dragCandidate = { id: item.id, x: event.clientX, y: event.clientY, canDrag: item.kind !== 'url' && Boolean(event.target.closest('.item-main')) };
   }
 
   function handleRowPointerUp(event: PointerEvent, item: PathItem) {
@@ -264,13 +285,21 @@
   }
 
   function mapStoredPath(item: StoredPath): PathItem {
-    const extension = item.kind === 'file' ? item.actual_name.split('.').pop()?.toLocaleUpperCase() : undefined;
+    const extension = item.kind === 'url' ? 'WEB' : item.kind === 'file' ? item.actual_name.split('.').pop()?.toLocaleUpperCase() : undefined;
     const lastUsedAt = formatLastUsed(item.last_used_at);
     return {
       id: item.id, name: item.name, actualName: item.actual_name, path: item.path, kind: item.kind,
       extension, tags: item.tags ?? [], category: item.category, memo: item.memo ?? '', favorite: item.favorite,
       useCount: item.use_count, lastUsedAt, rawLastUsedAt: item.last_used_at, excluded: item.excluded
     };
+  }
+
+  function itemKindLabel(kind: ItemKind) {
+    return kind === 'folder' ? 'フォルダー' : kind === 'url' ? 'URL' : 'ファイル';
+  }
+
+  function itemTypeBadge(item: PathItem) {
+    return item.kind === 'folder' ? 'DIR' : item.kind === 'url' ? 'WEB' : item.extension;
   }
 
   function formatLastUsed(value?: string | null): string | undefined {
@@ -382,6 +411,7 @@
   }
 
   async function openLocation(item: PathItem) {
+    if (item.kind === 'url') return;
     if (!isTauri()) {
       toast = `デスクトップ版で保存場所を開けます: ${narrowPath(item.path)}`;
     } else {
@@ -396,7 +426,7 @@
   }
 
   async function startPathDrag(item: PathItem) {
-    if (!isTauri()) return;
+    if (!isTauri() || item.kind === 'url') return;
     try {
       await invoke('start_registered_path_drag', { id: item.id });
     } catch (error) {
@@ -495,15 +525,15 @@
     itemMessage = '';
     const savingQueuedDrop = editItemId === null && pendingDropPaths.length > 0;
     const existing = editItemId === null ? null : items.find((item) => item.id === editItemId);
-    if (!existing && items.some((item) => normalizePathKey(item.path) === normalizePathKey(draftPath.trim()))) {
-      if (!window.confirm('この保存場所はすでに登録されています。同じパスを重複登録しますか？')) return;
-    }
     dataLoading = true;
     try {
       const validation = await validateRecordPath(draftPath.trim(), draftKindHint);
       draftPathValidation = validation;
       const validatedPath = validation.normalizedPath || draftPath.trim();
       const validatedKind = validation.detectedKind ?? draftKindHint;
+      if (!existing && items.some((item) => normalizePathKey(item.path) === normalizePathKey(validatedPath))) {
+        if (!window.confirm('同じパスまたはURLがすでに登録されています。重複して登録しますか？')) return;
+      }
       let id = editItemId;
       if (id === null) {
         const created = await invoke<StoredPath>('register_path', {
@@ -625,7 +655,7 @@
   }
 
   async function deleteItem(item: PathItem): Promise<boolean> {
-    if (!isTauri() || !window.confirm(`「${item.name}」をPathlyの登録から削除しますか？\n元ファイル自体は削除されません。`)) return false;
+    if (!isTauri() || !window.confirm(`「${item.name}」をPathlyの登録から削除しますか？\nリンク先自体には影響しません。`)) return false;
     try {
       await invoke('delete_registered_path', { id: item.id });
       await Promise.all([refreshItems(), refreshTaxonomy()]);
@@ -687,7 +717,7 @@
     const selectedItems = items.filter((item) => ids.includes(item.id));
     const names = selectedItems.slice(0, 5).map((item) => `・${item.name} (ID: ${item.id})`).join('\n');
     const more = selectedItems.length > 5 ? `\nほか ${selectedItems.length - 5} 件` : '';
-    if (!window.confirm(`${ids.length}件の登録レコードを削除します。\n関連するタグ情報も削除されます。元ファイル・フォルダーは削除されません。\n\n${names}${more}`)) return;
+    if (!window.confirm(`${ids.length}件の登録レコードを削除します。\n関連するタグ情報も削除されます。リンク先のファイル・フォルダー・Webページには影響しません。\n\n${names}${more}`)) return;
     bulkDeleteBusy = true;
     recordMessage = '';
     try {
@@ -723,8 +753,8 @@
     recordMessage = '';
   }
 
-  async function validateRecordPath(path: string, kindHint?: 'file' | 'folder'): Promise<PathValidation> {
-    if (!isTauri()) throw new Error('パス検証はデスクトップ版で利用できます。');
+  async function validateRecordPath(path: string, kindHint?: ItemKind): Promise<PathValidation> {
+    if (!isTauri()) throw new Error('パス・URL検証はデスクトップ版で利用できます。');
     return invoke<PathValidation>('validate_path', { path, kindHint: kindHint ?? null });
   }
 
@@ -1014,11 +1044,25 @@
   onMount(() => {
     let disposed = false;
     let unlistenDrop: (() => void) | undefined;
+    let unlistenLaunchSearch: (() => void) | undefined;
     window.addEventListener('keydown', onKeydown);
     window.addEventListener('pointermove', handlePointerMove);
     window.addEventListener('pointerup', handleGlobalPointerEnd, true);
     window.addEventListener('pointercancel', handleGlobalPointerEnd, true);
     if (isTauri()) {
+      void listen<{ query: string }>('launch-search', ({ payload }) => {
+        void showLaunchSearch(payload.query);
+      }).then(async (unlisten) => {
+        if (disposed) {
+          unlisten();
+          return;
+        }
+        unlistenLaunchSearch = unlisten;
+        const startupQuery = await invoke<string | null>('take_launch_search_query');
+        if (!disposed && startupQuery) await showLaunchSearch(startupQuery);
+      }).catch((error) => {
+        toast = `起動時検索を準備できませんでした: ${String(error)}`;
+      });
       void getCurrentWebviewWindow().onDragDropEvent(({ payload }) => {
         if (payload.type === 'enter' || payload.type === 'over') dropActive = true;
         else if (payload.type === 'leave') dropActive = false;
@@ -1048,6 +1092,7 @@
     return () => {
       disposed = true;
       unlistenDrop?.();
+      unlistenLaunchSearch?.();
       window.removeEventListener('keydown', onKeydown);
       window.removeEventListener('pointermove', handlePointerMove);
       window.removeEventListener('pointerup', handleGlobalPointerEnd, true);
@@ -1058,7 +1103,7 @@
 
 <svelte:head>
   <title>Pathly</title>
-  <meta name="description" content="登録したファイルとフォルダを、名前とタグで見つけて開くランチャー" />
+  <meta name="description" content="登録したファイル、フォルダ、URLを、名前とタグで見つけて開くランチャー" />
 </svelte:head>
 
 <div class="shell">
@@ -1134,7 +1179,7 @@
             <div class="managed-list">
               {#each items as item (item.id)}
                 <div class="managed-row">
-                  <div class="managed-type" aria-hidden="true">{item.kind === 'folder' ? 'DIR' : item.extension}</div>
+                  <div class="managed-type" aria-hidden="true">{itemTypeBadge(item)}</div>
                   <div class="managed-info"><strong>{item.name}</strong><span title={item.path}>{narrowPath(item.path, 64)}</span><div class="tags">{#each item.tags as tag}<span>#{tag}</span>{/each}{#if item.excluded}<span class="excluded-tag">検索対象外</span>{/if}</div></div>
                   <button class="text-button" onclick={() => beginEditItem(item)}>編集</button>
                 </div>
@@ -1152,6 +1197,7 @@
         </section>
         <section class="settings-card link-check-card" aria-labelledby="link-check-title">
           <div class="settings-card-heading"><div><h3 id="link-check-title">リンク切れ確認</h3></div><button class="secondary" disabled={linkCheckBusy} onclick={checkRegisteredPaths}>{linkCheckBusy ? '確認中…' : '今すぐ確認'}</button></div>
+          <p class="management-note">登録したファイルとフォルダーを確認します。URLは対象外です。</p>
           {#if linkCheckMessage}<p class="storage-message" role="status">{linkCheckMessage}</p>{/if}
           {#if brokenPaths.length}<div class="broken-list">{#each brokenPaths as broken}<div><strong>{broken.name}</strong><span title={broken.path}>{narrowPath(broken.path, 72)}</span><small>{broken.status === 'missing' ? '見つかりません' : '状態を確認できません'}</small><button class="text-button" onclick={() => { const item = items.find((candidate) => candidate.id === broken.id); if (item) beginEditItem(item); }}>確認</button></div>{/each}</div>{/if}
         </section>
@@ -1180,14 +1226,14 @@
         </div>
         <div class="record-search-row">
           <span aria-hidden="true">⌕</span>
-          <input bind:value={recordQuery} aria-label="レコードを検索" placeholder="ID、名前、ファイル名、パス、タグ、カテゴリを検索" />
+          <input bind:value={recordQuery} aria-label="レコードを検索" placeholder="ID、名前、ファイル名、パス、URL、タグ、カテゴリを検索" />
           <span>{recordResults.length} / {items.length}件</span>
         </div>
         {#if selectedRecordIds.length}<p class="record-message" role="status">{selectedRecordIds.length}件選択中{#if hiddenSelectedRecordCount > 0}（検索結果外に{hiddenSelectedRecordCount}件）{/if}。削除ボタンは検索結果外の選択も対象です。</p>{/if}
         {#if recordMessage}<p class:success={recordMessage.includes('削除しました')} class="record-message" role="status">{recordMessage}</p>{/if}
         <div class="records-grid">
           <section class="records-table-card" aria-label="レコード一覧">
-            <div class="records-table-head"><input type="checkbox" aria-label="表示中のレコードをすべて選択" checked={recordResults.length > 0 && recordResults.every((item) => selectedRecordIds.includes(item.id))} onchange={(event) => setVisibleRecordSelection(event.currentTarget.checked)} /><span>ID</span><span>名前</span><span>種別</span><span>パス</span><span>操作</span></div>
+            <div class="records-table-head"><input type="checkbox" aria-label="表示中のレコードをすべて選択" checked={recordResults.length > 0 && recordResults.every((item) => selectedRecordIds.includes(item.id))} onchange={(event) => setVisibleRecordSelection(event.currentTarget.checked)} /><span>ID</span><span>名前</span><span>種別</span><span>パス / URL</span><span>操作</span></div>
             <div class="records-table-body">
               {#each recordResults as item (item.id)}
                 <div class:active={recordDraft?.id === item.id} class:bulk-selected={selectedRecordIds.includes(item.id)} class="record-table-line">
@@ -1195,7 +1241,7 @@
                   <button class="record-table-row" onclick={(event) => handleRecordRowClick(event, item)}>
                     <span class="record-id">{item.id}</span>
                     <span class="record-name"><strong>{item.name}</strong><small>{item.actualName}</small></span>
-                    <span>{item.kind === 'folder' ? 'フォルダー' : 'ファイル'}</span>
+                    <span>{itemKindLabel(item.kind)}</span>
                     <span class="record-path" title={item.path}>{item.path}</span>
                     <span class="record-edit-label">編集</span>
                   </button>
@@ -1210,13 +1256,13 @@
             {#if recordDraft}
               <div class="record-editor-heading"><div><span>レコードID</span><strong>{recordDraft.id}</strong></div><button class="text-button danger-button" onclick={async () => { const item = items.find((candidate) => candidate.id === recordDraft?.id); if (item && await deleteItem(item)) recordDraft = null; }}>削除</button></div>
               <div class="record-form">
-                <label>実ファイル名 <span>読み取り専用</span><input value={recordDraft.actualName} readonly /></label>
+                <label>実ファイル名 / ホスト名 <span>読み取り専用</span><input value={recordDraft.actualName} readonly /></label>
                 <label>表示名<input bind:value={recordDraft.name} /></label>
-                <label>パス<textarea bind:value={recordDraft.path} rows="3" spellcheck="false" oninput={() => (recordValidation = null)}></textarea></label>
-                <div class="validation-row"><button class="secondary" disabled={recordValidationBusy || !recordDraft.path.trim()} onclick={() => void validateRecordDraft()}>{recordValidationBusy ? '確認中…' : 'パスを確認'}</button>
+                <label>パスまたはURL<textarea bind:value={recordDraft.path} rows="3" spellcheck="false" oninput={() => (recordValidation = null)}></textarea></label>
+                <div class="validation-row"><button class="secondary" disabled={recordValidationBusy || !recordDraft.path.trim()} onclick={() => void validateRecordDraft()}>{recordValidationBusy ? '確認中…' : '入力を確認'}</button>
                   {#if recordValidation}<span class:ok={recordValidation.status === 'exists'} class:warning={recordValidation.status !== 'exists'}>{recordValidation.message}</span>{/if}
                 </div>
-                <label>種別 <span>{recordValidation?.status === 'exists' ? 'パスから判定' : 'パスが見つからない場合に使用'}</span><select bind:value={recordDraft.kindHint} disabled={recordValidation?.status === 'exists'}><option value="file">ファイル</option><option value="folder">フォルダー</option></select></label>
+                <label>種別 <span>{recordValidation?.status === 'exists' ? '入力から判定' : 'パスが見つからない場合に使用'}</span><select bind:value={recordDraft.kindHint} disabled={recordValidation?.status === 'exists'}><option value="file">ファイル</option><option value="folder">フォルダー</option><option value="url">URL</option></select></label>
                 <label>タグ <span>カンマ区切り</span><input bind:value={recordDraft.tags} /></label>
                 <label>カテゴリ<input bind:value={recordDraft.category} /></label>
                 <label>メモ <span>検索対象外</span><textarea bind:value={recordDraft.memo} rows="3"></textarea></label>
@@ -1230,15 +1276,15 @@
             {/if}
           </aside>
         </div>
-        <p class="records-note">IDがある取込行だけを更新し、空のIDは新規追加します。パス一致による上書きは行いません。実ファイル自体を削除・変更することもありません。</p>
+        <p class="records-note">IDがある取込行だけを更新し、空のIDは新規追加します。パス・URL一致による上書きは行いません。リンク先自体を削除・変更することもありません。</p>
       </section>
       {/if}
     {:else}
       {#if showOptions}
         <div class="options-panel" aria-label="検索オプション">
           <span>追加の検索対象</span>
-          <label><input type="checkbox" bind:checked={options.fileName} /> ファイル名</label>
-          <label><input type="checkbox" bind:checked={options.path} /> 保存場所</label>
+          <label><input type="checkbox" bind:checked={options.fileName} /> ファイル名・ホスト名</label>
+          <label><input type="checkbox" bind:checked={options.path} /> パス・URL</label>
           <label class="sort-control">並び順<select bind:value={sortMode} onchange={() => (listPage = 0)}><option value="frequency">利用回数順</option><option value="last-used">最終利用日時の新しい順</option><option value="name">名前順</option></select></label>
         </div>
       {/if}
@@ -1246,22 +1292,22 @@
       <div class="content-grid">
         <section class="list-panel" aria-label="登録項目一覧">
           {#if results.length}
-            <div class="list-head"><span>項目</span><span>保存場所</span><span class="sr-only">操作</span></div>
+            <div class="list-head"><span>項目</span><span>パス / URL</span><span class="sr-only">操作</span></div>
             <div class="item-list">
               {#each visibleResults as item (item.id)}
                 <article class:selected={selected?.id === item.id} class="item-row" onpointerdown={(event) => handleRowPointerDown(event, item)} onpointerup={(event) => handleRowPointerUp(event, item)}>
                   <button class="item-main" aria-label={`${item.name}を開く`} onclick={(event) => { event.stopPropagation(); select(item); void openItem(item); }}>
-                    <span class:item-folder={item.kind === 'folder'} class="type-badge">{item.kind === 'folder' ? 'DIR' : item.extension}</span>
+                    <span class:item-folder={item.kind === 'folder'} class:item-url={item.kind === 'url'} class="type-badge">{itemTypeBadge(item)}</span>
                     <span class="item-copy"><strong>{item.name}</strong><span class="tags">{#each item.tags as tag}<span>#{tag}</span>{/each}</span></span>
                   </button>
                   <span class="path" title={item.path}>{narrowPath(item.path)}</span>
                   <button class:favorite-active={item.favorite} class="icon-button action-icon-button favorite-toggle" aria-label={item.favorite ? `${item.name}をお気に入りから解除` : `${item.name}をお気に入りに登録`} title={item.favorite ? 'お気に入り解除' : 'お気に入り登録'} onclick={(event) => { event.stopPropagation(); void toggleFavorite(item); }}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9z"/></svg></button>
-                  <button class="icon-button action-icon-button" aria-label={`${item.name}の場所を開く`} title="場所を開く" onclick={(event) => { event.stopPropagation(); openLocation(item); }}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7.5h7l2 2h9v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M3 7V5a2 2 0 0 1 2-2h5l2 2h5"/></svg></button>
+                  <button class="icon-button action-icon-button" disabled={item.kind === 'url'} aria-label={item.kind === 'url' ? `${item.name}には保存場所がありません` : `${item.name}の場所を開く`} title={item.kind === 'url' ? 'URLには保存場所がありません' : '場所を開く'} onclick={(event) => { event.stopPropagation(); openLocation(item); }}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7.5h7l2 2h9v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M3 7V5a2 2 0 0 1 2-2h5l2 2h5"/></svg></button>
                   <button class="icon-button subdued" aria-label={`${item.name}のその他の操作`} title="その他の操作" aria-expanded={actionMenuId === item.id} onclick={(event) => { event.stopPropagation(); select(item); actionMenuId = actionMenuId === item.id ? null : item.id; }}>•••</button>
                   {#if actionMenuId === item.id}
                     <div class="item-context-menu" aria-label={`${item.name}の操作`}>
                       <button onclick={(event) => { event.stopPropagation(); actionMenuId = null; void openItem(item); }}>開く</button>
-                      <button onclick={(event) => { event.stopPropagation(); actionMenuId = null; void openLocation(item); }}>保存場所を開く</button>
+                      {#if item.kind !== 'url'}<button onclick={(event) => { event.stopPropagation(); actionMenuId = null; void openLocation(item); }}>保存場所を開く</button>{/if}
                       <button onclick={(event) => { event.stopPropagation(); actionMenuId = null; beginEditItem(item); }}>編集</button>
                     </div>
                   {/if}
@@ -1280,19 +1326,19 @@
         <aside class="detail-panel" aria-label="選択項目の詳細">
           {#if selected}
             <div class="detail-top"><span class="detail-label">選択中</span><span class="status-dot">登録済み</span></div>
-            <div class="detail-title"><span class:item-folder={selected.kind === 'folder'} class="type-badge large">{selected.kind === 'folder' ? 'DIR' : selected.extension}</span><h2>{selected.name}</h2></div>
+            <div class="detail-title"><span class:item-folder={selected.kind === 'folder'} class:item-url={selected.kind === 'url'} class="type-badge large">{itemTypeBadge(selected)}</span><h2>{selected.name}</h2></div>
             <div class="detail-actions" aria-label="項目の操作">
               <button class:favorite-active={selected.favorite} class="icon-button action-icon-button favorite-toggle" aria-label={selected.favorite ? 'お気に入りから解除' : 'お気に入りに登録'} title={selected.favorite ? 'お気に入り解除' : 'お気に入り登録'} onclick={() => void toggleFavorite(selected)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9z"/></svg></button>
               <button class="icon-button action-icon-button detail-open" aria-label={`${selected.name}を開く`} title="開く (Enter)" onclick={() => openItem(selected)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M10 14 21 3M19 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h6" /></svg></button>
-              <button class="icon-button action-icon-button" aria-label="保存場所を開く" title="保存場所を開く" onclick={() => openLocation(selected)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7.5h7l2 2h9v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M3 7V5a2 2 0 0 1 2-2h5l2 2h5"/></svg></button>
+              <button class="icon-button action-icon-button" disabled={selected.kind === 'url'} aria-label={selected.kind === 'url' ? 'URLには保存場所がありません' : '保存場所を開く'} title={selected.kind === 'url' ? 'URLには保存場所がありません' : '保存場所を開く'} onclick={() => openLocation(selected)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7.5h7l2 2h9v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M3 7V5a2 2 0 0 1 2-2h5l2 2h5"/></svg></button>
               <button class="icon-button action-icon-button" aria-label="編集" title="編集" onclick={() => beginEditItem(selected)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 5 5 5M4 20l4.2-.9L19 8.3a2.1 2.1 0 0 0-3-3L5.2 16.1z"/><path d="M13 20h8"/></svg></button>
-              <button class="icon-button action-icon-button" aria-label="パスをコピー" title="パスをコピー" onclick={() => copyPath(selected.path)}><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg></button>
+              <button class="icon-button action-icon-button" aria-label={selected.kind === 'url' ? 'URLをコピー' : 'パスをコピー'} title={selected.kind === 'url' ? 'URLをコピー' : 'パスをコピー'} onclick={() => copyPath(selected.path)}><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg></button>
             </div>
             <dl>
               <div><dt>タグ</dt><dd class="detail-tags">{#each selected.tags as tag}<span>#{tag}</span>{/each}</dd></div>
-              <div><dt>ファイル名</dt><dd>{selected.actualName}</dd></div>
+              <div><dt>{selected.kind === 'url' ? 'ホスト名' : 'ファイル名'}</dt><dd>{selected.actualName}</dd></div>
               {#if selected.category}<div><dt>カテゴリ</dt><dd>{selected.category}</dd></div>{/if}
-              <div><dt>保存場所</dt><dd class="detail-path" title={selected.path}>{narrowPath(selected.path, 70)}</dd></div>
+              <div><dt>{selected.kind === 'url' ? 'URL' : '保存場所'}</dt><dd class="detail-path" title={selected.path}>{narrowPath(selected.path, 70)}</dd></div>
               <div><dt>最終利用日時</dt><dd>{selected.lastUsedAt ?? '利用履歴なし'}</dd></div>
               <div><dt>利用回数</dt><dd>{selected.useCount}回</dd></div>
               {#if selected.memo}<div><dt>メモ</dt><dd>{selected.memo}</dd></div>{/if}
@@ -1308,17 +1354,17 @@
   {#if showItemEditor}
     <div class="dialog-scrim" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) cancelItemEditor(); }}>
           <div class="item-dialog" role="dialog" aria-modal="true" aria-labelledby="item-dialog-title" tabindex="-1" use:manageDialogFocus>
-        <div class="dialog-heading"><div><div class="eyebrow">登録項目</div><h2 id="item-dialog-title">{editItemId === null ? 'ファイル・フォルダーを登録' : '登録内容を編集'}</h2></div><button class="icon-button" aria-label="閉じる" onclick={cancelItemEditor}>×</button></div>
+        <div class="dialog-heading"><div><div class="eyebrow">登録項目</div><h2 id="item-dialog-title">{editItemId === null ? 'ファイル・フォルダー・URLを登録' : '登録内容を編集'}</h2></div><button class="icon-button" aria-label="閉じる" onclick={cancelItemEditor}>×</button></div>
         {#if dropQueueTotal > 1}<p class="storage-note" role="status">複数登録 {dropQueueCompleted + 1} / {dropQueueTotal}件目（残り{pendingDropPaths.length}件）</p>{/if}
         <form onsubmit={(event) => { event.preventDefault(); void saveItem(); }}>
-          <label for="draft-path">ファイルまたはフォルダーのパス</label>
-          <input id="draft-path" bind:value={draftPath} oninput={() => (draftPathValidation = null)} placeholder="例: C:\\Users\\name\\Documents\\report.pdf" required spellcheck="false" />
+          <label for="draft-path">ファイル・フォルダーのパスまたはURL</label>
+          <input id="draft-path" bind:value={draftPath} oninput={() => (draftPathValidation = null)} placeholder="例: C:\\Users\\name\\report.pdf または https://example.com" required spellcheck="false" />
           <div class="path-picker-actions"><button class="secondary" type="button" disabled={pickerBusy} onclick={() => chooseRegistrationPath('file')}>ファイルを選ぶ</button><button class="secondary" type="button" disabled={pickerBusy} onclick={() => chooseRegistrationPath('folder')}>フォルダーを選ぶ</button></div>
-          <div class="registration-validation"><button class="secondary" type="button" disabled={draftValidationBusy || !draftPath.trim()} onclick={() => void validateDraftPath()}>{draftValidationBusy ? '確認中…' : 'パスを確認'}</button>{#if draftPathValidation}<span class:ok={draftPathValidation.status === 'exists'}>{draftPathValidation.message}</span>{/if}</div>
-          <label for="draft-kind">種別 <span>{draftPathValidation?.status === 'exists' ? 'パスから判定' : 'パスが見つからない場合に使用'}</span></label>
-          <select id="draft-kind" class="dialog-select" bind:value={draftKindHint} disabled={draftPathValidation?.status === 'exists'}><option value="file">ファイル</option><option value="folder">フォルダー</option></select>
+          <div class="registration-validation"><button class="secondary" type="button" disabled={draftValidationBusy || !draftPath.trim()} onclick={() => void validateDraftPath()}>{draftValidationBusy ? '確認中…' : '入力を確認'}</button>{#if draftPathValidation}<span class:ok={draftPathValidation.status === 'exists'}>{draftPathValidation.message}</span>{/if}</div>
+          <label for="draft-kind">種別 <span>{draftPathValidation?.status === 'exists' ? '入力から判定' : 'パスが見つからない場合に使用'}</span></label>
+          <select id="draft-kind" class="dialog-select" bind:value={draftKindHint} disabled={draftPathValidation?.status === 'exists'}><option value="file">ファイル</option><option value="folder">フォルダー</option><option value="url">URL</option></select>
           <label for="draft-name">名前</label>
-          <input id="draft-name" bind:value={draftName} placeholder="空欄ならファイル名から作成" />
+          <input id="draft-name" bind:value={draftName} placeholder="空欄ならファイル名またはホスト名から作成" />
           <div class="form-columns"><div><label for="draft-tags">タグ <span>カンマ区切り</span></label><input id="draft-tags" bind:value={draftTags} placeholder="例: 企画, 月次" list="known-tags" /><datalist id="known-tags">{#each taxonomyTags as tag}<option value={tag}></option>{/each}</datalist></div><div><label for="draft-category">カテゴリ <span>1つまで</span></label><input id="draft-category" bind:value={draftCategory} placeholder="任意" list="known-categories" /><datalist id="known-categories">{#each taxonomyCategories as category}<option value={category}></option>{/each}</datalist></div></div>
           <label for="draft-memo">メモ <span>検索対象外</span></label>
           <textarea id="draft-memo" bind:value={draftMemo} rows="3" placeholder="補足情報"></textarea>
@@ -1368,7 +1414,7 @@
                 <span>{row.rowNumber}</span>
                 <span class:preview-error={row.action === 'エラー'} class="preview-action">{row.action}</span>
                 <span><strong>{row.record?.id ?? '新規'} / {row.record?.name ?? '—'}</strong>{#if row.error}<small>{row.error}</small>{/if}</span>
-                <span>{row.validation?.status === 'exists' ? '存在を確認' : row.validation?.message ?? '未確認'}{#if row.duplicatePath}<small class="duplicate-warning">同じパスのレコードがあります（登録可）</small>{/if}</span>
+                <span>{row.validation?.message ?? '未確認'}{#if row.duplicatePath}<small class="duplicate-warning">同じパスまたはURLのレコードがあります（登録可）</small>{/if}</span>
               </div>
             {/each}
           </div>

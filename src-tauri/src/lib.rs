@@ -2,11 +2,46 @@ use rusqlite::{params, Connection, DatabaseName, Result as SqlResult, Transactio
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_opener::OpenerExt;
+use url::Url;
 
 const KIND_FILE: &str = "file";
 const KIND_FOLDER: &str = "folder";
+const KIND_URL: &str = "url";
+const LAUNCH_SEARCH_EVENT: &str = "launch-search";
+
+struct LaunchSearchState {
+    inner: Mutex<LaunchSearchInner>,
+}
+
+struct LaunchSearchInner {
+    pending_query: Option<String>,
+    frontend_ready: bool,
+}
+
+#[derive(Clone, Serialize)]
+struct LaunchSearchPayload {
+    query: String,
+}
+
+fn search_query_from_args(args: &[String]) -> Option<String> {
+    let query = args
+        .iter()
+        .skip(1)
+        .map(|argument| argument.trim())
+        .filter(|argument| !argument.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!query.is_empty()).then_some(query)
+}
+
+#[tauri::command]
+fn take_launch_search_query(state: State<'_, LaunchSearchState>) -> Option<String> {
+    let mut inner = state.inner.lock().ok()?;
+    inner.frontend_ready = true;
+    inner.pending_query.take()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisteredPath {
@@ -136,7 +171,6 @@ trait PathRepository: Send {
     ) -> RepositoryResult<Vec<RegisteredPath>>;
     fn delete(&self, id: i64) -> RepositoryResult<()>;
     fn delete_many(&self, ids: &[i64]) -> RepositoryResult<()>;
-    fn path_for(&self, id: i64) -> RepositoryResult<PathBuf>;
     fn mark_used(&self, id: i64) -> RepositoryResult<()>;
     fn check_registered_paths(&self) -> RepositoryResult<Vec<BrokenPath>>;
     fn list_taxonomy(&self) -> RepositoryResult<Taxonomy>;
@@ -272,9 +306,6 @@ impl PathRepository for SqlitePathRepository {
     }
     fn delete_many(&self, ids: &[i64]) -> RepositoryResult<()> {
         SqlitePathRepository::delete_many(self, ids).map_err(Into::into)
-    }
-    fn path_for(&self, id: i64) -> RepositoryResult<PathBuf> {
-        SqlitePathRepository::path_for(self, id).map_err(Into::into)
     }
     fn mark_used(&self, id: i64) -> RepositoryResult<()> {
         SqlitePathRepository::mark_used(self, id).map_err(Into::into)
@@ -475,17 +506,6 @@ impl SqlitePathRepository {
         transaction.commit()
     }
 
-    fn path_for(&self, id: i64) -> SqlResult<PathBuf> {
-        let connection = self.connection.lock().expect("repository mutex poisoned");
-        connection
-            .query_row(
-                "SELECT path FROM registered_paths WHERE id = ?1",
-                params![id],
-                |row| row.get::<_, String>(0),
-            )
-            .map(PathBuf::from)
-    }
-
     fn mark_used(&self, id: i64) -> SqlResult<()> {
         let connection = self.connection.lock().expect("repository mutex poisoned");
         if connection.execute("UPDATE registered_paths SET use_count = use_count + 1, last_used_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?1", params![id])? == 0 { return Err(rusqlite::Error::QueryReturnedNoRows); }
@@ -494,9 +514,9 @@ impl SqlitePathRepository {
 
     fn check_registered_paths(&self) -> SqlResult<Vec<BrokenPath>> {
         let connection = self.connection.lock().expect("repository mutex poisoned");
-        let mut statement =
-            connection.prepare("SELECT id, name, path FROM registered_paths ORDER BY id")?;
-        let rows = statement.query_map([], |row| {
+        let mut statement = connection
+            .prepare("SELECT id, name, path FROM registered_paths WHERE kind <> ?1 ORDER BY id")?;
+        let rows = statement.query_map(params![KIND_URL], |row| {
             Ok(BrokenPath {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -695,6 +715,9 @@ fn normalize_input_path(path: &str) -> String {
 }
 
 fn normalized_path_key(path: &str) -> String {
+    if path.contains("://") {
+        return path.to_lowercase();
+    }
     normalize_input_path(path).replace('/', "\\").to_lowercase()
 }
 
@@ -707,14 +730,18 @@ fn validate_kind_hint(kind_hint: Option<String>) -> Result<Option<String>, Strin
         None => Ok(None),
         Some(KIND_FILE) => Ok(Some(KIND_FILE.to_string())),
         Some(KIND_FOLDER) => Ok(Some(KIND_FOLDER.to_string())),
-        Some(_) => Err("種別は file または folder を指定してください".to_string()),
+        Some(KIND_URL) => Ok(Some(KIND_URL.to_string())),
+        Some(_) => Err("種別は file、folder、url のいずれかを指定してください".to_string()),
     }
 }
 
 fn validate_path_value(input: &str) -> Result<PathValidation, String> {
     let input = input.trim();
     if input.is_empty() {
-        return Err("パスを入力してください".to_string());
+        return Err("パスまたはURLを入力してください".to_string());
+    }
+    if input.contains("://") {
+        return validate_url_value(input);
     }
     let input_path = normalize_input_path(input);
     validate_path_syntax(&input_path)?;
@@ -770,6 +797,30 @@ fn validate_path_value(input: &str) -> Result<PathValidation, String> {
     })
 }
 
+fn parse_http_url(input: &str) -> Result<Url, String> {
+    let url = Url::parse(input).map_err(|_| "正しいURLを入力してください".to_string())?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("URLは http:// または https:// で指定してください".to_string());
+    }
+    if url.host_str().is_none() {
+        return Err("URLにはホスト名を指定してください".to_string());
+    }
+    Ok(url)
+}
+
+fn validate_url_value(input: &str) -> Result<PathValidation, String> {
+    let url = parse_http_url(input)?;
+    let actual_name = url.host_str().unwrap_or_default().to_string();
+    Ok(PathValidation {
+        input_path: input.to_string(),
+        normalized_path: url.to_string(),
+        actual_name,
+        status: "exists".to_string(),
+        detected_kind: Some(KIND_URL.to_string()),
+        message: "URLを確認できました。".to_string(),
+    })
+}
+
 fn validate_path_syntax(path: &str) -> Result<(), String> {
     if path
         .chars()
@@ -805,6 +856,11 @@ fn prepare_record_write(
         return Err("利用回数は0以上で指定してください".to_string());
     }
     let kind_hint = validate_kind_hint(record.kind_hint)?;
+    if kind_hint.as_deref() == Some(KIND_URL)
+        && validation.detected_kind.as_deref() != Some(KIND_URL)
+    {
+        return Err("URL種別には http:// または https:// のURLを指定してください".to_string());
+    }
     let unchanged_kind = existing
         .filter(|item| {
             normalized_path_key(&item.path) == normalized_path_key(&validation.normalized_path)
@@ -1074,16 +1130,23 @@ fn delete_registered_paths(ids: Vec<i64>, state: State<'_, AppState>) -> Result<
 
 #[tauri::command]
 fn open_registered_path(id: i64, app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    let path = state
+    let item = state
         .storage
         .lock()
         .map_err(|_| "保存先の状態を取得できません".to_string())?
         .repository
-        .path_for(id)
+        .get(id)
         .map_err(|error| error.to_string())?;
-    app.opener()
-        .open_path(path.to_string_lossy(), None::<&str>)
-        .map_err(|error| error.to_string())?;
+    if item.kind == KIND_URL {
+        let url = parse_http_url(&item.path)?;
+        app.opener()
+            .open_url(url.as_str(), None::<&str>)
+            .map_err(|error| error.to_string())?;
+    } else {
+        app.opener()
+            .open_path(item.path, None::<&str>)
+            .map_err(|error| error.to_string())?;
+    }
     if let Err(error) = state
         .storage
         .lock()
@@ -1102,13 +1165,17 @@ async fn start_registered_path_drag(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let path = state
+    let item = state
         .storage
         .lock()
         .map_err(|_| "保存先の状態を取得できません".to_string())?
         .repository
-        .path_for(id)
-        .map_err(|error| error.to_string())?
+        .get(id)
+        .map_err(|error| error.to_string())?;
+    if item.kind == KIND_URL {
+        return Err("URLはファイルとしてドラッグできません".to_string());
+    }
+    let path = PathBuf::from(item.path)
         .canonicalize()
         .map_err(|error| format!("登録先を確認できません: {error}"))?;
     let window = app
@@ -1138,15 +1205,18 @@ fn open_registered_location(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let path = state
+    let item = state
         .storage
         .lock()
         .map_err(|_| "保存先の状態を取得できません".to_string())?
         .repository
-        .path_for(id)
+        .get(id)
         .map_err(|error| error.to_string())?;
+    if item.kind == KIND_URL {
+        return Err("URLには保存場所がありません".to_string());
+    }
     app.opener()
-        .reveal_item_in_dir(path)
+        .reveal_item_in_dir(item.path)
         .map_err(|error| error.to_string())
 }
 
@@ -1347,10 +1417,44 @@ fn load_storage_state() -> Result<StorageState, String> {
 
 pub fn run() {
     let storage = load_storage_state().expect("failed to initialize Pathly storage");
+    let startup_args = std::env::args_os()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let startup_query = search_query_from_args(&startup_args);
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if let Some(query) = search_query_from_args(&args) {
+                let should_emit = app
+                    .state::<LaunchSearchState>()
+                    .inner
+                    .lock()
+                    .map(|mut inner| {
+                        if !inner.frontend_ready {
+                            inner.pending_query = Some(query.clone());
+                        }
+                        inner.frontend_ready
+                    })
+                    .unwrap_or(true);
+                if should_emit {
+                    let _ = app.emit(LAUNCH_SEARCH_EVENT, LaunchSearchPayload { query });
+                }
+            }
+
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .manage(LaunchSearchState {
+            inner: Mutex::new(LaunchSearchInner {
+                pending_query: startup_query,
+                frontend_ready: false,
+            }),
+        })
         .manage(AppState {
             storage: Mutex::new(storage),
         })
@@ -1372,6 +1476,7 @@ pub fn run() {
             open_registered_path,
             start_registered_path_drag,
             open_registered_location,
+            take_launch_search_query,
             get_storage_settings,
             set_storage_directory,
             reset_storage_directory
@@ -1383,6 +1488,18 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_search_uses_all_positional_arguments_as_one_query() {
+        let args = vec![
+            "Pathly.exe".to_string(),
+            "project".to_string(),
+            "#rust".to_string(),
+        ];
+
+        assert_eq!(search_query_from_args(&args), Some("project #rust".into()));
+        assert_eq!(search_query_from_args(&args[..1]), None);
+    }
 
     #[test]
     fn sqlite_repository_errors_map_to_database_neutral_errors() {
@@ -1457,7 +1574,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let repository = SqlitePathRepository::open(root.join("db.sqlite3")).unwrap();
-        repository.connection.lock().unwrap().execute("INSERT INTO registered_paths (name, actual_name, path, kind) VALUES ('Missing item','missing.txt',?1,'file')", params![root.join("missing.txt").to_string_lossy()]).unwrap();
+        repository.connection.lock().unwrap().execute("INSERT INTO registered_paths (name, actual_name, path, kind) VALUES ('Missing item','missing.txt',?1,'file'), ('Website','example.com','https://example.com/','url')", params![root.join("missing.txt").to_string_lossy()]).unwrap();
         let broken = repository.check_registered_paths().unwrap();
         assert_eq!(broken.len(), 1);
         assert_eq!(broken[0].id, 1);
@@ -1668,6 +1785,69 @@ mod tests {
         assert!(validate_path_syntax(r"C:\reports:archive\file.csv").is_err());
         assert!(validate_path_syntax(r"\\server").is_err());
         assert!(validate_path_syntax(r"\\server\share\file.csv").is_ok());
+    }
+
+    #[test]
+    fn url_validation_accepts_http_and_https_and_detects_url_kind() {
+        let validation = validate_path_value(" HTTPS://Example.COM/docs?q=rust ").unwrap();
+        assert_eq!(
+            validation.normalized_path,
+            "https://example.com/docs?q=rust"
+        );
+        assert_eq!(validation.actual_name, "example.com");
+        assert_eq!(validation.status, "exists");
+        assert_eq!(validation.detected_kind.as_deref(), Some(KIND_URL));
+        assert_eq!(validation.message, "URLを確認できました。");
+
+        let prepared = prepare_record_write(
+            RecordWrite {
+                id: None,
+                name: String::new(),
+                path: validation.normalized_path.clone(),
+                kind_hint: None,
+                tags: Vec::new(),
+                category: None,
+                memo: String::new(),
+                favorite: false,
+                use_count: 0,
+                last_used_at: None,
+                excluded: false,
+            },
+            validation,
+            None,
+        )
+        .unwrap();
+        assert_eq!(prepared.kind, KIND_URL);
+        assert_eq!(prepared.name, "example.com");
+        assert_eq!(prepared.actual_name, "example.com");
+
+        assert!(validate_path_value("ftp://example.com/file").is_err());
+        assert!(validate_path_value("https://").is_err());
+    }
+
+    #[test]
+    fn url_kind_cannot_be_used_for_a_filesystem_path() {
+        let root = std::env::temp_dir().join(format!("pathly-url-kind-{}", std::process::id()));
+        let missing = root.join("not-a-url");
+        let validation = validate_path_value(&missing.to_string_lossy()).unwrap();
+        let result = prepare_record_write(
+            RecordWrite {
+                id: None,
+                name: "Invalid URL".into(),
+                path: missing.to_string_lossy().into_owned(),
+                kind_hint: Some(KIND_URL.into()),
+                tags: Vec::new(),
+                category: None,
+                memo: String::new(),
+                favorite: false,
+                use_count: 0,
+                last_used_at: None,
+                excluded: false,
+            },
+            validation,
+            None,
+        );
+        assert!(result.is_err());
     }
 
     #[test]
