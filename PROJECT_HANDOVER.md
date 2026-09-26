@@ -4,7 +4,7 @@
 
 - ブランチ: `main`
 - `IMPROVEMENTS.md`の5項目は実装済み。
-- 関連するフロントエンドテスト、型・アクセシビリティ確認、本番ビルド、Rustテストと確認は成功済み。Windows/WebView2実機での手動確認は未実施。
+- 関連するフロントエンドテスト、型・アクセシビリティ確認、本番ビルド、Rustテストと確認は成功済み。Windows/WebView2実機での手動確認も完了済み。
 
 ## 対応済みの改善点
 
@@ -24,6 +24,11 @@
 - `cargo test --manifest-path src-tauri/Cargo.toml`: 28件成功
 - `cargo check --manifest-path src-tauri/Cargo.toml`: 成功
 - `git diff --check`: 問題なし
+- Windows/WebView2実機: 参照の登録・編集・コピー、専用アイコン、モーダルの画面外クリック、利用回数編集、メモ改行表示を確認済み
+
+## 未解決事項
+
+- なし。
 
 ## 次回作業時の注意
 
