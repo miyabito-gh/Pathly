@@ -1,5 +1,6 @@
 use rusqlite::{params, Connection, DatabaseName, Result as SqlResult, Transaction};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -265,17 +266,24 @@ fn normalize_stored_paths(connection: &mut Connection) -> SqlResult<()> {
 impl PathRepository for SqlitePathRepository {
     fn list(&self) -> RepositoryResult<Vec<RegisteredPath>> {
         let connection = self.connection.lock().expect("repository mutex poisoned");
+        let mut tags_by_path = HashMap::<i64, Vec<String>>::new();
+        {
+            let mut tags_statement =
+                connection.prepare("SELECT path_id, value FROM tags ORDER BY path_id, value")?;
+            let tags = tags_statement.query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?;
+            for tag in tags {
+                let (path_id, value) = tag?;
+                tags_by_path.entry(path_id).or_default().push(value);
+            }
+        }
         let mut statement = connection.prepare(
             "SELECT id, name, actual_name, path, kind, memo, favorite, use_count, last_used_at, excluded, category
              FROM registered_paths ORDER BY use_count DESC, name COLLATE NOCASE",
         )?;
         let rows = statement.query_map([], |row| {
             let id: i64 = row.get(0)?;
-            let mut tags =
-                connection.prepare("SELECT value FROM tags WHERE path_id = ? ORDER BY value")?;
-            let tags = tags
-                .query_map(params![id], |tag| tag.get(0))?
-                .collect::<SqlResult<Vec<String>>>()?;
             Ok(RegisteredPath {
                 id,
                 name: row.get(1)?,
@@ -287,7 +295,7 @@ impl PathRepository for SqlitePathRepository {
                 use_count: row.get(7)?,
                 last_used_at: row.get(8)?,
                 excluded: row.get::<_, i64>(9)? != 0,
-                tags,
+                tags: tags_by_path.remove(&id).unwrap_or_default(),
                 category: row.get(10)?,
             })
         })?;

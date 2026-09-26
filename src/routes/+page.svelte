@@ -5,7 +5,7 @@
   import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
   import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
   import { filterItems, narrowPath, sortItems, type SearchOptions, type SortMode } from '$lib/search';
-  import { sampleItems, type HomeMode, type ItemKind, type PathItem } from '$lib/pathItem';
+  import type { HomeMode, ItemKind, PathItem } from '$lib/pathItem';
   import { parseRecordTransfer, serializeRecords, type ParsedRecordRow, type RecordWrite } from '$lib/recordTransfer';
 
   type StoredPath = {
@@ -53,7 +53,7 @@
     duplicatePath?: boolean;
   };
 
-  let items: PathItem[] = sampleItems;
+  let items: PathItem[] = [];
   let mode: HomeMode = 'all';
   let query = '';
   let selectedId = 1;
@@ -71,7 +71,7 @@
   let storageBusy = false;
   let storageMessage = '';
   let storageError = false;
-  let dataLoading = false;
+  let dataLoading = true;
   let actionMenuId: number | null = null;
   let editItemId: number | null = null;
   let pendingDropPaths: string[] = [];
@@ -119,6 +119,10 @@
   let listPage = 0;
   let theme: 'dark' | 'light' = 'dark';
   const listPageSize = 50;
+  const lastUsedFormatter = new Intl.DateTimeFormat('ja-JP', {
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false
+  });
 
   async function showLaunchSearch(searchQuery: string) {
     const term = searchQuery.trim();
@@ -320,10 +324,7 @@
     if (!value) return undefined;
     const timestamp = /^\d+$/.test(value) ? new Date(Number(value) * 1000) : new Date(value);
     if (Number.isNaN(timestamp.getTime())) return value;
-    return new Intl.DateTimeFormat('ja-JP', {
-      year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', hour12: false
-    }).format(timestamp);
+    return lastUsedFormatter.format(timestamp);
   }
 
   async function copyPath(path: string) {
@@ -337,7 +338,10 @@
   }
 
   async function refreshItems() {
-    if (!isTauri()) return;
+    if (!isTauri()) {
+      dataLoading = false;
+      return;
+    }
     dataLoading = true;
     try {
       const stored = await invoke<StoredPath[]>('list_registered_paths');
