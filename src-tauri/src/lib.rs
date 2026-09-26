@@ -9,6 +9,7 @@ use url::Url;
 const KIND_FILE: &str = "file";
 const KIND_FOLDER: &str = "folder";
 const KIND_URL: &str = "url";
+const KIND_TEXT: &str = "text";
 const LAUNCH_SEARCH_EVENT: &str = "launch-search";
 
 struct LaunchSearchState {
@@ -232,9 +233,10 @@ impl SqlitePathRepository {
 
 fn normalize_stored_paths(connection: &mut Connection) -> SqlResult<()> {
     let paths = {
-        let mut statement = connection.prepare("SELECT id, path FROM registered_paths")?;
+        let mut statement =
+            connection.prepare("SELECT id, path FROM registered_paths WHERE kind IN (?1, ?2)")?;
         let paths = statement
-            .query_map([], |row| {
+            .query_map(params![KIND_FILE, KIND_FOLDER], |row| {
                 Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
             })?
             .collect::<SqlResult<Vec<_>>>()?;
@@ -514,9 +516,10 @@ impl SqlitePathRepository {
 
     fn check_registered_paths(&self) -> SqlResult<Vec<BrokenPath>> {
         let connection = self.connection.lock().expect("repository mutex poisoned");
-        let mut statement = connection
-            .prepare("SELECT id, name, path FROM registered_paths WHERE kind <> ?1 ORDER BY id")?;
-        let rows = statement.query_map(params![KIND_URL], |row| {
+        let mut statement = connection.prepare(
+            "SELECT id, name, path FROM registered_paths WHERE kind IN (?1, ?2) ORDER BY id",
+        )?;
+        let rows = statement.query_map(params![KIND_FILE, KIND_FOLDER], |row| {
             Ok(BrokenPath {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -674,7 +677,8 @@ fn register_path(
     excluded: bool,
     state: State<'_, AppState>,
 ) -> Result<RegisteredPath, String> {
-    let validation = validate_path_value(&path)?;
+    let validated_kind_hint = validate_kind_hint(kind_hint.clone())?;
+    let validation = validate_registered_value(&path, validated_kind_hint.as_deref())?;
     let record = prepare_record_write(
         RecordWrite {
             id: None,
@@ -731,8 +735,30 @@ fn validate_kind_hint(kind_hint: Option<String>) -> Result<Option<String>, Strin
         Some(KIND_FILE) => Ok(Some(KIND_FILE.to_string())),
         Some(KIND_FOLDER) => Ok(Some(KIND_FOLDER.to_string())),
         Some(KIND_URL) => Ok(Some(KIND_URL.to_string())),
-        Some(_) => Err("種別は file、folder、url のいずれかを指定してください".to_string()),
+        Some(KIND_TEXT) => Ok(Some(KIND_TEXT.to_string())),
+        Some(_) => Err("種別は file、folder、url、text のいずれかを指定してください".to_string()),
     }
+}
+
+fn validate_registered_value(
+    input: &str,
+    kind_hint: Option<&str>,
+) -> Result<PathValidation, String> {
+    if kind_hint == Some(KIND_TEXT) {
+        let value = input.trim();
+        if value.is_empty() {
+            return Err("文字列を入力してください".to_string());
+        }
+        return Ok(PathValidation {
+            input_path: input.to_string(),
+            normalized_path: value.to_string(),
+            actual_name: value.to_string(),
+            status: "exists".to_string(),
+            detected_kind: Some(KIND_TEXT.to_string()),
+            message: "参照として登録できます。".to_string(),
+        });
+    }
+    validate_path_value(input)
 }
 
 fn validate_path_value(input: &str) -> Result<PathValidation, String> {
@@ -912,8 +938,8 @@ fn prepare_record_write(
 
 #[tauri::command]
 fn validate_path(path: String, kind_hint: Option<String>) -> Result<PathValidation, String> {
-    validate_kind_hint(kind_hint)?;
-    validate_path_value(&path)
+    let kind_hint = validate_kind_hint(kind_hint)?;
+    validate_registered_value(&path, kind_hint.as_deref())
 }
 
 #[tauri::command]
@@ -926,6 +952,7 @@ fn update_registered_path(
     category: Option<String>,
     memo: String,
     favorite: bool,
+    use_count: i64,
     excluded: bool,
     state: State<'_, AppState>,
 ) -> Result<RegisteredPath, String> {
@@ -937,7 +964,8 @@ fn update_registered_path(
         .repository
         .get(id)
         .map_err(|error| error.to_string())?;
-    let validation = validate_path_value(&path)?;
+    let validated_kind_hint = validate_kind_hint(kind_hint.clone())?;
+    let validation = validate_registered_value(&path, validated_kind_hint.as_deref())?;
     let record = prepare_record_write(
         RecordWrite {
             id: Some(id),
@@ -948,7 +976,7 @@ fn update_registered_path(
             category,
             memo,
             favorite,
-            use_count: existing.use_count,
+            use_count,
             last_used_at: existing.last_used_at.clone(),
             excluded,
         },
@@ -993,7 +1021,8 @@ fn apply_record_batch(
             ),
             None => None,
         };
-        let validation = validate_path_value(&record.path)
+        let validated_kind_hint = validate_kind_hint(record.kind_hint.clone())?;
+        let validation = validate_registered_value(&record.path, validated_kind_hint.as_deref())
             .map_err(|error| format!("{}: {error}", record.path))?;
         prepared.push(prepare_record_write(record, validation, existing.as_ref())?);
     }
@@ -1137,6 +1166,9 @@ fn open_registered_path(id: i64, app: AppHandle, state: State<'_, AppState>) -> 
         .repository
         .get(id)
         .map_err(|error| error.to_string())?;
+    if item.kind == KIND_TEXT {
+        return Err("参照は開くことができません。コピーして利用してください".to_string());
+    }
     if item.kind == KIND_URL {
         let url = parse_http_url(&item.path)?;
         app.opener()
@@ -1172,8 +1204,8 @@ async fn start_registered_path_drag(
         .repository
         .get(id)
         .map_err(|error| error.to_string())?;
-    if item.kind == KIND_URL {
-        return Err("URLはファイルとしてドラッグできません".to_string());
+    if !matches!(item.kind.as_str(), KIND_FILE | KIND_FOLDER) {
+        return Err("ファイルとフォルダー以外はドラッグできません".to_string());
     }
     let path = PathBuf::from(item.path)
         .canonicalize()
@@ -1212,8 +1244,8 @@ fn open_registered_location(
         .repository
         .get(id)
         .map_err(|error| error.to_string())?;
-    if item.kind == KIND_URL {
-        return Err("URLには保存場所がありません".to_string());
+    if !matches!(item.kind.as_str(), KIND_FILE | KIND_FOLDER) {
+        return Err("この種別には保存場所がありません".to_string());
     }
     app.opener()
         .reveal_item_in_dir(item.path)
@@ -1848,6 +1880,99 @@ mod tests {
             None,
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn text_kind_accepts_non_path_values_and_preserves_the_selected_kind() {
+        let value = r"reference | with * invalid ? path characters";
+        let validation = validate_registered_value(value, Some(KIND_TEXT)).unwrap();
+        assert_eq!(validation.normalized_path, value);
+        assert_eq!(validation.actual_name, value);
+        assert_eq!(validation.detected_kind.as_deref(), Some(KIND_TEXT));
+
+        let prepared = prepare_record_write(
+            RecordWrite {
+                id: None,
+                name: String::new(),
+                path: value.into(),
+                kind_hint: Some(KIND_TEXT.into()),
+                tags: Vec::new(),
+                category: None,
+                memo: String::new(),
+                favorite: false,
+                use_count: 7,
+                last_used_at: None,
+                excluded: false,
+            },
+            validation,
+            None,
+        )
+        .unwrap();
+        assert_eq!(prepared.kind, KIND_TEXT);
+        assert_eq!(prepared.name, value);
+        assert_eq!(prepared.use_count, 7);
+        assert!(validate_registered_value("   ", Some(KIND_TEXT)).is_err());
+        assert!(validate_registered_value(value, Some(KIND_FILE)).is_err());
+    }
+
+    #[test]
+    fn text_records_are_not_checked_as_filesystem_paths() {
+        let root = std::env::temp_dir().join(format!("pathly-text-kind-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let repository = SqlitePathRepository::open(root.join("db.sqlite3")).unwrap();
+        repository.connection.lock().unwrap().execute(
+            "INSERT INTO registered_paths (name, actual_name, path, kind) VALUES ('Text', 'not a path', 'not a path', ?1)",
+            params![KIND_TEXT],
+        ).unwrap();
+        assert!(repository.check_registered_paths().unwrap().is_empty());
+        drop(repository);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn record_update_can_change_usage_count_without_clearing_last_used_at() {
+        let root = std::env::temp_dir().join(format!("pathly-use-count-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let repository = SqlitePathRepository::open(root.join("db.sqlite3")).unwrap();
+        let path = root.join("report.txt");
+        std::fs::write(&path, "report").unwrap();
+        repository.connection.lock().unwrap().execute(
+            "INSERT INTO registered_paths (name, actual_name, path, kind, use_count, last_used_at) VALUES ('Report', 'report.txt', ?1, ?2, 2, '2026-09-22T12:00:00Z')",
+            params![path.to_string_lossy(), KIND_FILE],
+        ).unwrap();
+        let existing = repository.list().unwrap().remove(0);
+        let validation = validate_registered_value(&existing.path, Some(KIND_FILE)).unwrap();
+        let prepared = prepare_record_write(
+            RecordWrite {
+                id: Some(existing.id),
+                name: existing.name.clone(),
+                path: existing.path.clone(),
+                kind_hint: Some(existing.kind.clone()),
+                tags: existing.tags.clone(),
+                category: existing.category.clone(),
+                memo: existing.memo.clone(),
+                favorite: existing.favorite,
+                use_count: 9,
+                last_used_at: existing.last_used_at.clone(),
+                excluded: existing.excluded,
+            },
+            validation,
+            Some(&existing),
+        )
+        .unwrap();
+        let updated = repository
+            .apply_record_batch(vec![prepared])
+            .unwrap()
+            .remove(0);
+        assert_eq!(updated.use_count, 9);
+        assert_eq!(
+            updated.last_used_at.as_deref(),
+            Some("2026-09-22T12:00:00Z")
+        );
+        drop(repository);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

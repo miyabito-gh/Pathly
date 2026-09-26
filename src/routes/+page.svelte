@@ -88,6 +88,7 @@
   let draftMemo = '';
   let draftFavorite = false;
   let draftExcluded = false;
+  let draftUseCount = 0;
   let draftKindHint: ItemKind = 'file';
   let draftPathValidation: PathValidation | null = null;
   let draftValidationBusy = false;
@@ -156,7 +157,7 @@
 
   function handleRowPointerDown(event: PointerEvent, item: PathItem) {
     if (event.button !== 0 || !(event.target instanceof Element) || event.target.closest('button')) return;
-    dragCandidate = { id: item.id, x: event.clientX, y: event.clientY, canDrag: item.kind !== 'url' && Boolean(event.target.closest('.item-main')) };
+    dragCandidate = { id: item.id, x: event.clientX, y: event.clientY, canDrag: isFilesystemItem(item) && Boolean(event.target.closest('.item-main')) };
   }
 
   function handleRowPointerUp(event: PointerEvent, item: PathItem) {
@@ -204,6 +205,7 @@
         category: item.category || null,
         memo: item.memo,
         favorite: !item.favorite,
+        useCount: item.useCount,
         excluded: item.excluded
       });
       await refreshItems();
@@ -285,7 +287,7 @@
   }
 
   function mapStoredPath(item: StoredPath): PathItem {
-    const extension = item.kind === 'url' ? 'WEB' : item.kind === 'file' ? item.actual_name.split('.').pop()?.toLocaleUpperCase() : undefined;
+    const extension = item.kind === 'file' ? item.actual_name.split('.').pop()?.toLocaleUpperCase() : undefined;
     const lastUsedAt = formatLastUsed(item.last_used_at);
     return {
       id: item.id, name: item.name, actualName: item.actual_name, path: item.path, kind: item.kind,
@@ -295,11 +297,23 @@
   }
 
   function itemKindLabel(kind: ItemKind) {
-    return kind === 'folder' ? 'フォルダー' : kind === 'url' ? 'URL' : 'ファイル';
+    return kind === 'folder' ? 'フォルダー' : kind === 'url' ? 'URL' : kind === 'text' ? '参照' : 'ファイル';
   }
 
   function itemTypeBadge(item: PathItem) {
-    return item.kind === 'folder' ? 'DIR' : item.kind === 'url' ? 'WEB' : item.extension;
+    return item.kind === 'folder' ? 'DIR' : item.kind === 'url' ? 'WEB' : item.kind === 'text' ? 'REF' : item.extension;
+  }
+
+  function isFilesystemItem(item: PathItem): boolean {
+    return item.kind === 'file' || item.kind === 'folder';
+  }
+
+  function canOpenItem(item: PathItem): boolean {
+    return item.kind !== 'text';
+  }
+
+  function pathLabel(item: PathItem): string {
+    return item.kind === 'url' ? 'URL' : item.kind === 'text' ? '参照' : '保存場所';
   }
 
   function formatLastUsed(value?: string | null): string | undefined {
@@ -315,9 +329,9 @@
   async function copyPath(path: string) {
     try {
       await navigator.clipboard.writeText(path);
-      toast = 'パスをコピーしました';
+      toast = '値をコピーしました';
     } catch {
-      toast = 'パスをコピーできませんでした';
+      toast = '値をコピーできませんでした';
     }
     window.setTimeout(() => (toast = ''), 2600);
   }
@@ -395,6 +409,7 @@
   }
 
   async function openItem(item: PathItem) {
+    if (!canOpenItem(item)) return;
     rememberSearch();
     if (!isTauri()) {
       toast = `デスクトップ版で「${item.name}」を開けます`;
@@ -411,7 +426,7 @@
   }
 
   async function openLocation(item: PathItem) {
-    if (item.kind === 'url') return;
+    if (!isFilesystemItem(item)) return;
     if (!isTauri()) {
       toast = `デスクトップ版で保存場所を開けます: ${narrowPath(item.path)}`;
     } else {
@@ -426,7 +441,7 @@
   }
 
   async function startPathDrag(item: PathItem) {
-    if (!isTauri() || item.kind === 'url') return;
+    if (!isTauri() || !isFilesystemItem(item)) return;
     try {
       await invoke('start_registered_path_drag', { id: item.id });
     } catch (error) {
@@ -454,6 +469,7 @@
     draftMemo = '';
     draftFavorite = false;
     draftExcluded = false;
+    draftUseCount = 0;
     draftKindHint = 'file';
     draftPathValidation = null;
     itemMessage = '';
@@ -472,6 +488,7 @@
     draftMemo = item.memo;
     draftFavorite = item.favorite;
     draftExcluded = item.excluded;
+    draftUseCount = item.useCount;
     draftKindHint = item.kind;
     draftPathValidation = null;
     itemMessage = '';
@@ -525,6 +542,10 @@
     itemMessage = '';
     const savingQueuedDrop = editItemId === null && pendingDropPaths.length > 0;
     const existing = editItemId === null ? null : items.find((item) => item.id === editItemId);
+    if (existing && (!Number.isSafeInteger(draftUseCount) || draftUseCount < 0)) {
+      itemMessage = '利用回数は0以上の整数で指定してください。';
+      return;
+    }
     dataLoading = true;
     try {
       const validation = await validateRecordPath(draftPath.trim(), draftKindHint);
@@ -557,6 +578,7 @@
           category: draftCategory.trim() || null,
           memo: draftMemo,
           favorite: draftFavorite,
+          useCount: draftUseCount,
           excluded: draftExcluded
         });
       }
@@ -580,6 +602,7 @@
         draftMemo = '';
         draftFavorite = false;
         draftExcluded = false;
+        draftUseCount = 0;
         draftKindHint = 'file';
         draftPathValidation = null;
         itemMessage = '';
@@ -785,7 +808,7 @@
       memo: draft.memo,
       favorite: draft.favorite,
       excluded: draft.excluded,
-      useCount: Math.max(0, Math.trunc(Number(draft.useCount) || 0)),
+      useCount: draft.useCount,
       lastUsedAt: draft.lastUsedAt.trim() || null
     };
   }
@@ -794,6 +817,10 @@
     if (!recordDraft || recordSaving || !isTauri()) return;
     if (!recordDraft.name.trim() || !recordDraft.path.trim()) {
       recordMessage = '名前とパスを入力してください。';
+      return;
+    }
+    if (!Number.isSafeInteger(recordDraft.useCount) || recordDraft.useCount < 0) {
+      recordMessage = '利用回数は0以上の整数で指定してください。';
       return;
     }
     recordSaving = true;
@@ -1031,7 +1058,7 @@
     } else if (event.key === 'ArrowUp' && (document.activeElement === searchInput || (document.activeElement as HTMLElement)?.closest('.item-row'))) {
       event.preventDefault();
       focusSelection(-1);
-    } else if (event.key === 'Enter' && selected && (event.target === searchInput || (event.target as HTMLElement).classList.contains('item-main'))) {
+    } else if (event.key === 'Enter' && selected && canOpenItem(selected) && (event.target === searchInput || (event.target as HTMLElement).classList.contains('item-main'))) {
       event.preventDefault();
       rememberSearch();
       openItem(selected);
@@ -1179,7 +1206,7 @@
             <div class="managed-list">
               {#each items as item (item.id)}
                 <div class="managed-row">
-                  <div class="managed-type" aria-hidden="true">{itemTypeBadge(item)}</div>
+                  <div class:item-text={item.kind === 'text'} class="managed-type" aria-hidden="true">{itemTypeBadge(item)}</div>
                   <div class="managed-info"><strong>{item.name}</strong><span title={item.path}>{narrowPath(item.path, 64)}</span><div class="tags">{#each item.tags as tag}<span>#{tag}</span>{/each}{#if item.excluded}<span class="excluded-tag">検索対象外</span>{/if}</div></div>
                   <button class="text-button" onclick={() => beginEditItem(item)}>編集</button>
                 </div>
@@ -1256,13 +1283,13 @@
             {#if recordDraft}
               <div class="record-editor-heading"><div><span>レコードID</span><strong>{recordDraft.id}</strong></div><button class="text-button danger-button" onclick={async () => { const item = items.find((candidate) => candidate.id === recordDraft?.id); if (item && await deleteItem(item)) recordDraft = null; }}>削除</button></div>
               <div class="record-form">
-                <label>実ファイル名 / ホスト名 <span>読み取り専用</span><input value={recordDraft.actualName} readonly /></label>
+                <label>実ファイル名 / ホスト名 / 登録文字列 <span>読み取り専用</span><input value={recordDraft.actualName} readonly /></label>
                 <label>表示名<input bind:value={recordDraft.name} /></label>
                 <label>パスまたはURL<textarea bind:value={recordDraft.path} rows="3" spellcheck="false" oninput={() => (recordValidation = null)}></textarea></label>
                 <div class="validation-row"><button class="secondary" disabled={recordValidationBusy || !recordDraft.path.trim()} onclick={() => void validateRecordDraft()}>{recordValidationBusy ? '確認中…' : '入力を確認'}</button>
                   {#if recordValidation}<span class:ok={recordValidation.status === 'exists'} class:warning={recordValidation.status !== 'exists'}>{recordValidation.message}</span>{/if}
                 </div>
-                <label>種別 <span>{recordValidation?.status === 'exists' ? '入力から判定' : 'パスが見つからない場合に使用'}</span><select bind:value={recordDraft.kindHint} disabled={recordValidation?.status === 'exists'}><option value="file">ファイル</option><option value="folder">フォルダー</option><option value="url">URL</option></select></label>
+                <label>種別 <span>{recordValidation?.status === 'exists' ? '入力から判定' : 'パスが見つからない場合に使用'}</span><select bind:value={recordDraft.kindHint} disabled={recordValidation?.status === 'exists'}><option value="file">ファイル</option><option value="folder">フォルダー</option><option value="url">URL</option><option value="text">参照</option></select></label>
                 <label>タグ <span>カンマ区切り</span><input bind:value={recordDraft.tags} /></label>
                 <label>カテゴリ<input bind:value={recordDraft.category} /></label>
                 <label>メモ <span>検索対象外</span><textarea bind:value={recordDraft.memo} rows="3"></textarea></label>
@@ -1296,18 +1323,18 @@
             <div class="item-list">
               {#each visibleResults as item (item.id)}
                 <article class:selected={selected?.id === item.id} class="item-row" onpointerdown={(event) => handleRowPointerDown(event, item)} onpointerup={(event) => handleRowPointerUp(event, item)}>
-                  <button class="item-main" aria-label={`${item.name}を開く`} onclick={(event) => { event.stopPropagation(); select(item); void openItem(item); }}>
-                    <span class:item-folder={item.kind === 'folder'} class:item-url={item.kind === 'url'} class="type-badge">{itemTypeBadge(item)}</span>
+                  <button class="item-main" aria-label={canOpenItem(item) ? `${item.name}を開く` : `${item.name}を選択`} onclick={(event) => { event.stopPropagation(); select(item); if (canOpenItem(item)) void openItem(item); }}>
+                    <span class:item-folder={item.kind === 'folder'} class:item-url={item.kind === 'url'} class:item-text={item.kind === 'text'} class="type-badge">{#if item.kind === 'text'}<svg class="reference-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4.5A1.5 1.5 0 0 1 7.5 3h9A1.5 1.5 0 0 1 18 4.5V21l-6-4-6 4z" /></svg>{:else}{itemTypeBadge(item)}{/if}</span>
                     <span class="item-copy"><strong>{item.name}</strong><span class="tags">{#each item.tags as tag}<span>#{tag}</span>{/each}</span></span>
                   </button>
                   <span class="path" title={item.path}>{narrowPath(item.path)}</span>
                   <button class:favorite-active={item.favorite} class="icon-button action-icon-button favorite-toggle" aria-label={item.favorite ? `${item.name}をお気に入りから解除` : `${item.name}をお気に入りに登録`} title={item.favorite ? 'お気に入り解除' : 'お気に入り登録'} onclick={(event) => { event.stopPropagation(); void toggleFavorite(item); }}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9z"/></svg></button>
-                  <button class="icon-button action-icon-button" disabled={item.kind === 'url'} aria-label={item.kind === 'url' ? `${item.name}には保存場所がありません` : `${item.name}の場所を開く`} title={item.kind === 'url' ? 'URLには保存場所がありません' : '場所を開く'} onclick={(event) => { event.stopPropagation(); openLocation(item); }}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7.5h7l2 2h9v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M3 7V5a2 2 0 0 1 2-2h5l2 2h5"/></svg></button>
+                  <button class="icon-button action-icon-button" disabled={!isFilesystemItem(item)} aria-label={!isFilesystemItem(item) ? `${item.name}には保存場所がありません` : `${item.name}の場所を開く`} title={!isFilesystemItem(item) ? 'この種別には保存場所がありません' : '場所を開く'} onclick={(event) => { event.stopPropagation(); openLocation(item); }}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7.5h7l2 2h9v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M3 7V5a2 2 0 0 1 2-2h5l2 2h5"/></svg></button>
                   <button class="icon-button subdued" aria-label={`${item.name}のその他の操作`} title="その他の操作" aria-expanded={actionMenuId === item.id} onclick={(event) => { event.stopPropagation(); select(item); actionMenuId = actionMenuId === item.id ? null : item.id; }}>•••</button>
                   {#if actionMenuId === item.id}
                     <div class="item-context-menu" aria-label={`${item.name}の操作`}>
-                      <button onclick={(event) => { event.stopPropagation(); actionMenuId = null; void openItem(item); }}>開く</button>
-                      {#if item.kind !== 'url'}<button onclick={(event) => { event.stopPropagation(); actionMenuId = null; void openLocation(item); }}>保存場所を開く</button>{/if}
+                      {#if canOpenItem(item)}<button onclick={(event) => { event.stopPropagation(); actionMenuId = null; void openItem(item); }}>開く</button>{/if}
+                      {#if isFilesystemItem(item)}<button onclick={(event) => { event.stopPropagation(); actionMenuId = null; void openLocation(item); }}>保存場所を開く</button>{/if}
                       <button onclick={(event) => { event.stopPropagation(); actionMenuId = null; beginEditItem(item); }}>編集</button>
                     </div>
                   {/if}
@@ -1326,22 +1353,22 @@
         <aside class="detail-panel" aria-label="選択項目の詳細">
           {#if selected}
             <div class="detail-top"><span class="detail-label">選択中</span><span class="status-dot">登録済み</span></div>
-            <div class="detail-title"><span class:item-folder={selected.kind === 'folder'} class:item-url={selected.kind === 'url'} class="type-badge large">{itemTypeBadge(selected)}</span><h2>{selected.name}</h2></div>
+            <div class="detail-title"><span class:item-folder={selected.kind === 'folder'} class:item-url={selected.kind === 'url'} class:item-text={selected.kind === 'text'} class="type-badge large">{#if selected.kind === 'text'}<svg class="reference-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4.5A1.5 1.5 0 0 1 7.5 3h9A1.5 1.5 0 0 1 18 4.5V21l-6-4-6 4z" /></svg>{:else}{itemTypeBadge(selected)}{/if}</span><h2>{selected.name}</h2></div>
             <div class="detail-actions" aria-label="項目の操作">
               <button class:favorite-active={selected.favorite} class="icon-button action-icon-button favorite-toggle" aria-label={selected.favorite ? 'お気に入りから解除' : 'お気に入りに登録'} title={selected.favorite ? 'お気に入り解除' : 'お気に入り登録'} onclick={() => void toggleFavorite(selected)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9z"/></svg></button>
-              <button class="icon-button action-icon-button detail-open" aria-label={`${selected.name}を開く`} title="開く (Enter)" onclick={() => openItem(selected)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M10 14 21 3M19 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h6" /></svg></button>
-              <button class="icon-button action-icon-button" disabled={selected.kind === 'url'} aria-label={selected.kind === 'url' ? 'URLには保存場所がありません' : '保存場所を開く'} title={selected.kind === 'url' ? 'URLには保存場所がありません' : '保存場所を開く'} onclick={() => openLocation(selected)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7.5h7l2 2h9v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M3 7V5a2 2 0 0 1 2-2h5l2 2h5"/></svg></button>
+              <button class="icon-button action-icon-button detail-open" disabled={!canOpenItem(selected)} aria-label={canOpenItem(selected) ? `${selected.name}を開く` : '参照は開けません'} title={canOpenItem(selected) ? '開く (Enter)' : '参照はコピーして利用'} onclick={() => openItem(selected)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M10 14 21 3M19 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h6" /></svg></button>
+              <button class="icon-button action-icon-button" disabled={!isFilesystemItem(selected)} aria-label={isFilesystemItem(selected) ? '保存場所を開く' : 'この種別には保存場所がありません'} title={isFilesystemItem(selected) ? '保存場所を開く' : 'この種別には保存場所がありません'} onclick={() => openLocation(selected)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7.5h7l2 2h9v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M3 7V5a2 2 0 0 1 2-2h5l2 2h5"/></svg></button>
               <button class="icon-button action-icon-button" aria-label="編集" title="編集" onclick={() => beginEditItem(selected)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 5 5 5M4 20l4.2-.9L19 8.3a2.1 2.1 0 0 0-3-3L5.2 16.1z"/><path d="M13 20h8"/></svg></button>
-              <button class="icon-button action-icon-button" aria-label={selected.kind === 'url' ? 'URLをコピー' : 'パスをコピー'} title={selected.kind === 'url' ? 'URLをコピー' : 'パスをコピー'} onclick={() => copyPath(selected.path)}><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg></button>
+              <button class="icon-button action-icon-button" aria-label={`${pathLabel(selected)}をコピー`} title={`${pathLabel(selected)}をコピー`} onclick={() => copyPath(selected.path)}><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg></button>
             </div>
             <dl>
               <div><dt>タグ</dt><dd class="detail-tags">{#each selected.tags as tag}<span>#{tag}</span>{/each}</dd></div>
-              <div><dt>{selected.kind === 'url' ? 'ホスト名' : 'ファイル名'}</dt><dd>{selected.actualName}</dd></div>
+              <div><dt>{selected.kind === 'url' ? 'ホスト名' : selected.kind === 'text' ? '登録文字列' : 'ファイル名'}</dt><dd>{selected.actualName}</dd></div>
               {#if selected.category}<div><dt>カテゴリ</dt><dd>{selected.category}</dd></div>{/if}
-              <div><dt>{selected.kind === 'url' ? 'URL' : '保存場所'}</dt><dd class="detail-path" title={selected.path}>{narrowPath(selected.path, 70)}</dd></div>
+              <div><dt>{pathLabel(selected)}</dt><dd class="detail-path" title={selected.path}>{narrowPath(selected.path, 70)}</dd></div>
               <div><dt>最終利用日時</dt><dd>{selected.lastUsedAt ?? '利用履歴なし'}</dd></div>
               <div><dt>利用回数</dt><dd>{selected.useCount}回</dd></div>
-              {#if selected.memo}<div><dt>メモ</dt><dd>{selected.memo}</dd></div>{/if}
+              {#if selected.memo}<div><dt>メモ</dt><dd class="detail-memo">{selected.memo}</dd></div>{/if}
             </dl>
           {:else}
             <div class="detail-empty">項目を選択すると詳細を表示します。</div>
@@ -1352,22 +1379,23 @@
   </main>
 
   {#if showItemEditor}
-    <div class="dialog-scrim" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) cancelItemEditor(); }}>
+    <div class="dialog-scrim" role="presentation">
           <div class="item-dialog" role="dialog" aria-modal="true" aria-labelledby="item-dialog-title" tabindex="-1" use:manageDialogFocus>
-        <div class="dialog-heading"><div><div class="eyebrow">登録項目</div><h2 id="item-dialog-title">{editItemId === null ? 'ファイル・フォルダー・URLを登録' : '登録内容を編集'}</h2></div><button class="icon-button" aria-label="閉じる" onclick={cancelItemEditor}>×</button></div>
+        <div class="dialog-heading"><div><div class="eyebrow">登録項目</div><h2 id="item-dialog-title">{editItemId === null ? 'ファイル・フォルダー・URL・参照を登録' : '登録内容を編集'}</h2></div><button class="icon-button" aria-label="閉じる" onclick={cancelItemEditor}>×</button></div>
         {#if dropQueueTotal > 1}<p class="storage-note" role="status">複数登録 {dropQueueCompleted + 1} / {dropQueueTotal}件目（残り{pendingDropPaths.length}件）</p>{/if}
         <form onsubmit={(event) => { event.preventDefault(); void saveItem(); }}>
-          <label for="draft-path">ファイル・フォルダーのパスまたはURL</label>
+          <label for="draft-path">パス、URLまたは文字列</label>
           <input id="draft-path" bind:value={draftPath} oninput={() => (draftPathValidation = null)} placeholder="例: C:\\Users\\name\\report.pdf または https://example.com" required spellcheck="false" />
           <div class="path-picker-actions"><button class="secondary" type="button" disabled={pickerBusy} onclick={() => chooseRegistrationPath('file')}>ファイルを選ぶ</button><button class="secondary" type="button" disabled={pickerBusy} onclick={() => chooseRegistrationPath('folder')}>フォルダーを選ぶ</button></div>
           <div class="registration-validation"><button class="secondary" type="button" disabled={draftValidationBusy || !draftPath.trim()} onclick={() => void validateDraftPath()}>{draftValidationBusy ? '確認中…' : '入力を確認'}</button>{#if draftPathValidation}<span class:ok={draftPathValidation.status === 'exists'}>{draftPathValidation.message}</span>{/if}</div>
           <label for="draft-kind">種別 <span>{draftPathValidation?.status === 'exists' ? '入力から判定' : 'パスが見つからない場合に使用'}</span></label>
-          <select id="draft-kind" class="dialog-select" bind:value={draftKindHint} disabled={draftPathValidation?.status === 'exists'}><option value="file">ファイル</option><option value="folder">フォルダー</option><option value="url">URL</option></select>
+          <select id="draft-kind" class="dialog-select" bind:value={draftKindHint} disabled={draftPathValidation?.status === 'exists'}><option value="file">ファイル</option><option value="folder">フォルダー</option><option value="url">URL</option><option value="text">参照</option></select>
           <label for="draft-name">名前</label>
           <input id="draft-name" bind:value={draftName} placeholder="空欄ならファイル名またはホスト名から作成" />
           <div class="form-columns"><div><label for="draft-tags">タグ <span>カンマ区切り</span></label><input id="draft-tags" bind:value={draftTags} placeholder="例: 企画, 月次" list="known-tags" /><datalist id="known-tags">{#each taxonomyTags as tag}<option value={tag}></option>{/each}</datalist></div><div><label for="draft-category">カテゴリ <span>1つまで</span></label><input id="draft-category" bind:value={draftCategory} placeholder="任意" list="known-categories" /><datalist id="known-categories">{#each taxonomyCategories as category}<option value={category}></option>{/each}</datalist></div></div>
           <label for="draft-memo">メモ <span>検索対象外</span></label>
           <textarea id="draft-memo" bind:value={draftMemo} rows="3" placeholder="補足情報"></textarea>
+          {#if editItemId !== null}<label for="draft-use-count">利用回数</label><input id="draft-use-count" type="number" min="0" step="1" bind:value={draftUseCount} />{/if}
           <div class="form-checks"><label><input type="checkbox" bind:checked={draftFavorite} /> お気に入り</label><label><input type="checkbox" bind:checked={draftExcluded} /> 検索対象外</label></div>
           {#if itemMessage}<p class="storage-message error" role="status">{itemMessage}</p>{/if}
           <div class="dialog-actions">{#if editItemId !== null}<button class="secondary danger-button dialog-unregister" type="button" disabled={dataLoading} onclick={() => void deleteEditedItem()}>登録解除</button>{/if}<button class="secondary" type="button" onclick={cancelItemEditor}>キャンセル</button><button class="primary" type="submit" disabled={dataLoading}>{dataLoading ? '保存中…' : '保存する'}</button></div>
@@ -1377,7 +1405,7 @@
   {/if}
 
   {#if taxonomyEditor}
-    <div class="dialog-scrim" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) taxonomyEditor = null; }}>
+    <div class="dialog-scrim" role="presentation">
       <div class="item-dialog taxonomy-dialog" role="dialog" aria-modal="true" aria-labelledby="taxonomy-dialog-title" tabindex="-1" use:manageDialogFocus>
         <div class="dialog-heading"><div><div class="eyebrow">一括変更</div><h2 id="taxonomy-dialog-title">{taxonomyEditor.kind === 'tag' ? 'タグ名を変更' : 'カテゴリ名を変更'}</h2></div><button class="icon-button" aria-label="閉じる" onclick={() => (taxonomyEditor = null)}>×</button></div>
         <label for="taxonomy-new-name">新しい名前</label><input id="taxonomy-new-name" bind:value={taxonomyDraft} />
@@ -1388,7 +1416,7 @@
   {/if}
 
   {#if transferDialog === 'paste'}
-    <div class="dialog-scrim" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) transferDialog = null; }}>
+    <div class="dialog-scrim" role="presentation">
       <div class="item-dialog transfer-dialog" role="dialog" aria-modal="true" aria-labelledby="paste-dialog-title" tabindex="-1" use:manageDialogFocus>
         <div class="dialog-heading"><div><div class="eyebrow">Excel / TSV</div><h2 id="paste-dialog-title">レコードを貼り付け</h2></div><button class="icon-button" aria-label="閉じる" onclick={() => (transferDialog = null)}>×</button></div>
         <p class="transfer-help">「Excelへコピー」で取得したヘッダー付きの表を貼り付けてください。IDが空の行は追加、既存IDの行は更新として確認します。</p>
@@ -1400,7 +1428,7 @@
   {/if}
 
   {#if transferDialog === 'preview'}
-    <div class="dialog-scrim" role="presentation" onclick={(event) => { if (event.target === event.currentTarget && !importBusy) transferDialog = null; }}>
+    <div class="dialog-scrim" role="presentation">
       <div class="item-dialog transfer-dialog preview-dialog" role="dialog" aria-modal="true" aria-labelledby="preview-dialog-title" tabindex="-1" use:manageDialogFocus>
         <div class="dialog-heading"><div><div class="eyebrow">{transferSource || 'インポート'}</div><h2 id="preview-dialog-title">反映内容を確認</h2></div><button class="icon-button" aria-label="閉じる" disabled={importBusy} onclick={() => (transferDialog = null)}>×</button></div>
         {#if importBusy}<div class="import-loading">パスとレコードを確認しています…</div>{/if}

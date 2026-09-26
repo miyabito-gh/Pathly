@@ -33,3 +33,12 @@ test('URL records accept the url kind', async () => {
   assert.equal(parsed.record.kindHint, 'url');
   assert.equal(parsed.record.path, 'https://openai.com/');
 });
+
+test('arbitrary text records accept the text kind', async () => {
+  const { parseRecordTransfer, recordTransferHeaders } = await import('./recordTransfer.ts');
+  const row = ['', 'Reference', '', 'text', 'not a valid | path', '', '', '', 'false', 'false', '0', ''];
+  const parsed = parseRecordTransfer([recordTransferHeaders.join('\t'), row.join('\t')].join('\n'), '\t')[0];
+  assert.equal(parsed.error, undefined);
+  assert.equal(parsed.record.kindHint, 'text');
+  assert.equal(parsed.record.path, 'not a valid | path');
+});

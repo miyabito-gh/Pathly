@@ -1,5 +1,5 @@
 export type HomeMode = 'all' | 'favorites' | 'recent' | 'frequent';
-export type ItemKind = 'file' | 'folder' | 'url';
+export type ItemKind = 'file' | 'folder' | 'url' | 'text';
 
 export type PathItem = {
   id: number;
