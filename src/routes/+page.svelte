@@ -1198,8 +1198,8 @@
 
     {#if manageOpen}
       <div class="management-switcher" aria-label="管理メニュー">
-        <button class:current={manageSection === 'overview'} onclick={() => (manageSection = 'overview')}>設定</button>
-        <button class:current={manageSection === 'records'} onclick={() => (manageSection = 'records')}>レコード</button>
+        <button class:current={manageSection === 'overview'} aria-pressed={manageSection === 'overview'} onclick={() => (manageSection = 'overview')}>設定</button>
+        <button class:current={manageSection === 'records'} aria-pressed={manageSection === 'records'} onclick={() => (manageSection = 'records')}>レコード</button>
       </div>
       {#if manageSection === 'overview'}
       <section class="management" aria-labelledby="management-title">
@@ -1350,7 +1350,28 @@
               <div><button class="pagination-button" disabled={listPage === 0} aria-label="前のページ" onclick={() => void changeListPage(-1)}>‹</button><span>{listPage + 1} / {pageCount}</span><button class="pagination-button" disabled={listPage >= pageCount - 1} aria-label="次のページ" onclick={() => void changeListPage(1)}>›</button></div>
             </div>
           {:else}
-            <div class="empty-state"><div class="empty-icon">⌕</div><h2>見つかりません</h2><p>名前やタグを変えるか、検索オプションを開いてください。</p></div>
+            <div class="empty-state" aria-live="polite" aria-busy={dataLoading}>
+              {#if dataLoading}
+                <div class="empty-icon" aria-hidden="true">…</div>
+                <h2>登録項目を読み込んでいます</h2>
+                <p>登録済みの項目を確認しています。</p>
+              {:else if items.length === 0}
+                <div class="empty-icon" aria-hidden="true">＋</div>
+                <h2>登録項目はまだありません</h2>
+                <p>ファイル、フォルダー、URL、参照を登録すると、ここから検索できます。</p>
+                <button class="primary" onclick={beginNewItem}>＋ 項目を登録</button>
+              {:else if query.trim()}
+                <div class="empty-icon" aria-hidden="true">⌕</div>
+                <h2>検索結果がありません</h2>
+                <p>検索語を変えるか、追加の検索対象を検索オプションで有効にしてください。</p>
+                <button class="secondary" onclick={() => (showOptions = true)}>検索オプションを開く</button>
+              {:else}
+                <div class="empty-icon" aria-hidden="true">⌕</div>
+                <h2>表示できる項目がありません</h2>
+                <p>ホームに戻ると、登録済み項目をすべて表示します。</p>
+                <button class="secondary" onclick={goHome}>ホームを表示</button>
+              {/if}
+            </div>
           {/if}
         </section>
 
@@ -1390,6 +1411,7 @@
         <form onsubmit={(event) => { event.preventDefault(); void saveItem(); }}>
           <label for="draft-path">パス、URLまたは文字列</label>
           <input id="draft-path" bind:value={draftPath} oninput={() => (draftPathValidation = null)} placeholder="例: C:\\Users\\name\\report.pdf または https://example.com" required spellcheck="false" />
+          <p class="field-hint">ファイル・フォルダーは絶対パス、URLはHTTP/HTTPSを入力します。任意の文字列は種別を「参照」にしてください。</p>
           <div class="path-picker-actions"><button class="secondary" type="button" disabled={pickerBusy} onclick={() => chooseRegistrationPath('file')}>ファイルを選ぶ</button><button class="secondary" type="button" disabled={pickerBusy} onclick={() => chooseRegistrationPath('folder')}>フォルダーを選ぶ</button></div>
           <div class="registration-validation"><button class="secondary" type="button" disabled={draftValidationBusy || !draftPath.trim()} onclick={() => void validateDraftPath()}>{draftValidationBusy ? '確認中…' : '入力を確認'}</button>{#if draftPathValidation}<span class:ok={draftPathValidation.status === 'exists'}>{draftPathValidation.message}</span>{/if}</div>
           <label for="draft-kind">種別 <span>{draftPathValidation?.status === 'exists' ? '入力から判定' : 'パスが見つからない場合に使用'}</span></label>
