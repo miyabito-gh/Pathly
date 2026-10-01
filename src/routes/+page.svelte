@@ -1055,6 +1055,7 @@
     } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
       event.preventDefault();
       searchInput?.focus();
+      searchInput?.select();
     } else if (event.key === 'ArrowDown' && (document.activeElement === searchInput || (document.activeElement as HTMLElement)?.closest('.item-row'))) {
       event.preventDefault();
       if (historyOpen) { historyOpen = false; searchInput?.focus(); }
@@ -1169,6 +1170,7 @@
           <span class="search-icon" aria-hidden="true">⌕</span>
           <input bind:this={searchInput} bind:value={query} oninput={() => (listPage = 0)} aria-label="名前、タグ、カテゴリを検索。#でタグ、@でカテゴリを指定" placeholder="名前・タグ・カテゴリを検索（#タグ / @カテゴリ）" />
           <kbd>Ctrl K</kbd>
+          {#if query}<button class="clear-search-button" aria-label="検索文字列を消去" title="検索文字列を消去" onclick={() => { query = ''; listPage = 0; searchInput?.focus(); }}>×</button>{/if}
           <button class:active={historyOpen} class="options-button" aria-label="検索履歴" aria-expanded={historyOpen} title="検索履歴" onclick={() => (historyOpen = !historyOpen)}>◷</button>
           <button class:active={showOptions} class="options-button" aria-label="検索オプション" title="検索オプション" onclick={() => (showOptions = !showOptions)}>☷</button>
           {#if historyOpen}
